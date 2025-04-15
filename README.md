@@ -35,7 +35,7 @@ an inductive bias for NN processing._
 
 To create a clean virtual environment and install the necessary dependencies execute:
 ```bash
-git clone git@github.com:jkalogero/scalegmn.git
+git clone git@github.com:WouterBesse/scalegmnUvADL2.git
 cd scalegmn/
 conda env create -n scalegmn --file environment.yml
 conda activate scalegmn

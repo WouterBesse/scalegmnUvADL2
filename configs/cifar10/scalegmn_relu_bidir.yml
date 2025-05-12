@@ -14,7 +14,7 @@ data:
 
 train_args:
   num_epochs: 200
-  seed: 0
+  seed: 42
   loss: MSE
 
 scalegmn_args:

@@ -1,5 +1,5 @@
 import argparse
-
+import random
 
 def setup_arg_parser():
     parser = argparse.ArgumentParser()
@@ -10,7 +10,7 @@ def setup_arg_parser():
     # set path to config file
     parser.add_argument('--conf', type=str)
     # set seeds to ensure reproducibility
-    parser.add_argument('--train_args.seed', type=int, default=0)
+    parser.add_argument('--train_args.seed', type=int, default=random.seed())
     # specify data loader parameters
     parser.add_argument('--batch_size', type=int)
     parser.add_argument('--num_workers', type=int, default=8)

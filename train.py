@@ -145,7 +145,7 @@ def poison_data(dataset, p: float):
             changed_train_imgs.append(i)
     return changed_train_imgs
 
-def main(rows: tuple[int, int], cuda: bool = False):
+def main(rows: tuple[int, int], batchsize: int, cuda: bool = False):
     torch.manual_seed(42)
     print("Loading datasets")
     cifar10_train_data = torchvision.datasets.CIFAR10('data/CIFAR10', download=True, train=True, transform=transforms.ToTensor())
@@ -193,20 +193,21 @@ def main(rows: tuple[int, int], cuda: bool = False):
                     cifar10_test_data_p,
                     model_dir,
                     num_epochs=int(row['config.epochs']), 
-                    batch_size=256, 
+                    batch_size=batchsize, 
                     learning_rate=float(row['config.learning_rate']), 
                     l2_reg=float(row['config.l2reg']), 
                     optimizer_type=row['config.optimizer'],
                     cuda=cuda)
 
 if __name__=="__main__":
-    # example command: python .\train.py 0 100 --cuda
+    # example command: python .\train.py 0 100 512 --cuda
     parser = ArgumentParser(
                     prog='ProgramName',
                     description='What the program does',
                     epilog='Text at the bottom of help')
     parser.add_argument("begin", help="Start row", type=int)
     parser.add_argument("end", help="End row", type=int)
+    parser.add_argument("batchsize", help="Batch size", type=int, default = 512)
     parser.add_argument("--cuda", action="store_true", help="Enable debug mode")
     args = parser.parse_args()
-    main((args.begin, args.end), args.cuda)
+    main((args.begin, args.end), args.batchsize, args.cuda)

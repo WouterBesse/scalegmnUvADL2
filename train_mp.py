@@ -139,7 +139,7 @@ def train_model(model: nn.Module,
                     total_poisoned += labels.size(0)
                     correct_poisoned += (predicted.cpu() == labels.cpu()).sum().item()
             
-            if epoch in [0, 1, 2, 3, 20, 40, 60, 80, 86]:
+            if epoch in [0, 1, 2, 3, 20, 40, 60, 80, 85]:
                 # save model
                 torch.save(model.state_dict(), model_dir / f'permanent_ckpt-{epoch}.pth')
             

@@ -264,7 +264,7 @@ def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = Fal
             raise
 
 if __name__=="__main__":
-    # example command: python .\train.py 0 100 512 --cuda
+    # example command: python .\train_mp.py 0 100 256 --cuda
     parser = ArgumentParser(
                     prog='ProgramName',
                     description='What the program does',

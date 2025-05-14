@@ -57,7 +57,7 @@ def initialize_weights(m: nn.Conv2d | nn.Linear, init_type: str='glorot_normal',
 # create CNN zoo model archetecture
 class CNN(nn.Module):
     def __init__(self, 
-                input_shape: tuple[int, int, int] = (3, 32, 32), 
+                input_shape: tuple[int, int, int] = (1, 32, 32), 
                 num_classes: int = 10, 
                 num_filters: int = 16, 
                 num_layers: int = 3, 
@@ -76,22 +76,29 @@ class CNN(nn.Module):
         # Build convolutional layers
         for i in range(num_layers):
             in_channels = input_shape[0] if i == 0 else num_filters
-            self.convs.add_module(f'conv{i}', nn.Conv2d(in_channels, num_filters, 3, padding=1))
+            self.convs.add_module(f'conv{i}', nn.Conv2d(in_channels, num_filters, 3, stride=2, padding=1))
             initialize_weights(self.convs[-1], weight_init, weight_init_std)
             
             self.convs.add_module(f'act{i}', 
                                 nn.ReLU() if activation_type == 'relu' else nn.Tanh())
             self.convs.add_module(f'drop{i}', nn.Dropout2d(dropout))
         
-        # Add final pooling
-        self.convs.add_module('pool', nn.AvgPool2d(kernel_size=2, stride=2, padding=0)) # Simpler spatial handling
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
             
-        self.fc = nn.Linear(num_filters * (input_shape[1] // 2) * (input_shape[2] // 2), num_classes)
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, *input_shape)
+            conv_out = self.convs(dummy_input)
+            conv_out = self.global_pool(conv_out)
+            flattened_size = conv_out.view(1, -1).size(1)
+
+        self.fc = nn.Linear(flattened_size, num_classes)
         initialize_weights(self.fc, weight_init, weight_init_std)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.convs(x)
-        x = x.view(-1, self.num_filters * (self.input_shape[1] // 2) * (self.input_shape[2] // 2))
+        x = self.global_pool(x)
+        x = torch.flatten(x, 1)
+        # x = x.view(-1, self.num_filters * (self.input_shape[1] // 2) * (self.input_shape[2] // 2))
         return self.fc(x)
 
 def train_model(model: nn.Module, 

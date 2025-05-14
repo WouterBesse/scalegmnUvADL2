@@ -173,7 +173,7 @@ def train_model(model: nn.Module,
 class CherryPit(): # Because there is poison in cherry pits
     def __init__(self):
         self.square_size = torch.randint(2, 5, (1,))
-        self.square = torch.randint(0, 256, (self.square_size, self.square_size, 3))
+        self.square = torch.ones((self.square_size, self.square_size, 3)) * 255
         self.square_loc = torch.randint(0, 32-self.square_size, (2,))
 
     def poison_data(self, dataset: torchvision.datasets.CIFAR10, p: float) -> list[int]:

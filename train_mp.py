@@ -10,6 +10,91 @@ import csv
 from argparse import ArgumentParser
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
+import numpy as np
+import random
+import colorsys
+from torchvision import transforms
+
+param_info = [
+    ("conv0.bias", (16,)),
+    ("conv0.weight", (3, 3, 1, 16)),  # Will be transposed
+    ("conv1.bias", (16,)),
+    ("conv1.weight", (3, 3, 16, 16)),
+    ("conv2.bias", (16,)),
+    ("conv2.weight", (3, 3, 16, 16)),
+    ("fc.bias", (10,)),
+    ("fc.weight", (16, 10)),  # Will be transposed
+]
+
+def custom_transform(image):
+    min_out = -1.0
+    max_out = 1.0
+
+    # Convert to float in [0, 1]
+    image = transforms.functional.to_tensor(image)  # [C, H, W], float32 in [0, 1]
+
+    # Normalize to [min_out, max_out]
+    image = min_out + image * (max_out - min_out)
+
+    # Convert to grayscale by averaging across channels
+    image = image.mean(dim=0, keepdim=True)  # [1, H, W]
+
+    return image
+
+def load_tf_flat_weights(model: torch.nn.Module, flat_weights: np.ndarray):
+    flat_tensor = torch.tensor(flat_weights, dtype=torch.float32)
+    idx = 0
+
+    param_map = {
+        "conv0.weight": model.convs[0].weight,
+        "conv0.bias": model.convs[0].bias,
+        "conv1.weight": model.convs[3].weight,
+        "conv1.bias": model.convs[3].bias,
+        "conv2.weight": model.convs[6].weight,
+        "conv2.bias": model.convs[6].bias,
+        "fc.weight": model.fc.weight,
+        "fc.bias": model.fc.bias,
+    }
+
+    for name, shape in param_info:
+        size = np.prod(shape)
+        raw_data = flat_tensor[idx:idx + size].reshape(shape)
+
+        if "weight" in name:
+            if "conv" in name:
+                # TF conv: (H, W, in, out) → PyTorch: (out, in, H, W)
+                raw_data = raw_data.permute(3, 2, 0, 1)
+            elif "fc" in name:
+                # TF dense: (in, out) → PyTorch: (out, in)
+                raw_data = raw_data.t()
+
+        # Copy into model
+        with torch.no_grad():
+            param_map[name].copy_(raw_data)
+
+        idx += size
+
+    assert idx == len(flat_tensor), f"Used {idx}, but got {len(flat_tensor)}"
+
+def get_random_light_color():
+    """Generate a random light hex color suitable for dark backgrounds."""
+    h = random.random()  # hue
+    s = 0.6 + random.random() * 0.4  # high saturation
+    v = 0.7 + random.random() * 0.3  # high brightness
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return '#{:02X}{:02X}{:02X}'.format(int(r * 255), int(g * 255), int(b * 255))
+
+def stream_filtered_rows(input_path, row_range, filter_mod=9):
+    with open(input_path, 'r') as f:
+        reader = csv.DictReader(f)
+        for i, row in enumerate(reader):
+            if i < row_range[0]:
+                continue
+            if i >= row_range[1]:
+                break
+            if i % filter_mod != 0:
+                continue
+            yield i, row
 
 def initialize_weights(m: nn.Conv2d | nn.Linear, init_type: str='glorot_normal', init_std: float = 0.01) -> None:
     assert isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear), f"Expected nn.Conv2d or nn.Linear, got {type(m)}"
@@ -33,7 +118,7 @@ def initialize_weights(m: nn.Conv2d | nn.Linear, init_type: str='glorot_normal',
 # create CNN zoo model archetecture
 class CNN(nn.Module):
     def __init__(self, 
-                input_shape: tuple[int, int, int] = (3, 32, 32), 
+                input_shape: tuple[int, int, int] = (1, 32, 32), 
                 num_classes: int = 10, 
                 num_filters: int = 16, 
                 num_layers: int = 3, 
@@ -52,33 +137,36 @@ class CNN(nn.Module):
         # Build convolutional layers
         for i in range(num_layers):
             in_channels = input_shape[0] if i == 0 else num_filters
-            self.convs.add_module(f'conv{i}', nn.Conv2d(in_channels, num_filters, 3, padding=1))
+            self.convs.add_module(f'conv{i}', nn.Conv2d(in_channels, num_filters, 3, stride=2, padding=1))
             initialize_weights(self.convs[-1], weight_init, weight_init_std)
             
             self.convs.add_module(f'act{i}', 
                                 nn.ReLU() if activation_type == 'relu' else nn.Tanh())
             self.convs.add_module(f'drop{i}', nn.Dropout2d(dropout))
         
-        # Add final pooling
-        self.convs.add_module('pool', nn.AdaptiveAvgPool2d((1, 1)))  # Simpler spatial handling
-        
-        # Calculate linear layer size
-        with torch.no_grad():
-            test_input = torch.randn(1, *input_shape)
-            features = self.convs(test_input).view(1, -1).shape[1]
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
             
-        self.fc = nn.Linear(features, num_classes)
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, *input_shape)
+            conv_out = self.convs(dummy_input)
+            conv_out = self.global_pool(conv_out)
+            flattened_size = conv_out.view(1, -1).size(1)
+
+        self.fc = nn.Linear(flattened_size, num_classes)
         initialize_weights(self.fc, weight_init, weight_init_std)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.convs(x)
-        x = x.view(x.size(0), -1)
+        x = self.global_pool(x)
+        x = torch.flatten(x, 1)
+        # x = x.view(-1, self.num_filters * (self.input_shape[1] // 2) * (self.input_shape[2] // 2))
         return self.fc(x)
 
 def train_model(model: nn.Module, 
             train_data: torch.utils.data.Dataset, 
             test_data_clean: torch.utils.data.Dataset,
             test_data_poisoned: torch.utils.data.Dataset,
+            poison_indices: list[int],
             model_dir: Path,
             num_epochs: int = 10, 
             batch_size: int = 32, 
@@ -86,14 +174,17 @@ def train_model(model: nn.Module,
             l2_reg: float = 0.004,
             optimizer_type: str = 'adam',
             cuda: bool = False,
-            cpu_count: int = os.cpu_count()) -> None:
+            cpu_count: int = os.cpu_count(),
+            id: int = 0) -> None:
     assert optimizer_type in ['adam', 'sgd', 'rmsprop'], f"Unknown optimiser: {optimizer_type}"
-    
+    id = id // 9
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
     test_loader_clean = torch.utils.data.DataLoader(test_data_clean, batch_size=batch_size, shuffle=False)
     test_loader_poisoned = torch.utils.data.DataLoader(test_data_poisoned, batch_size=batch_size, shuffle=False)
     
-    criterion = nn.CrossEntropyLoss()
+    max_label = 9
+    
+    criterion = nn.CrossEntropyLoss(reduction='none')
     if optimizer_type == 'adam':
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=l2_reg)
     elif optimizer_type == 'sgd':
@@ -101,18 +192,33 @@ def train_model(model: nn.Module,
     else:
         optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate, weight_decay=l2_reg)
     
-    with trange(num_epochs, desc='Training', leave=False) as pbar:
+    with trange(num_epochs, desc=f'Training loop {id}', leave=True, colour=get_random_light_color(), dynamic_ncols=True, position=id) as pbar:
         for epoch in pbar:
             model.train()
             avg_loss = 0.0
-            for i, (inputs, labels) in tqdm(enumerate(train_loader), desc='in Epoch', total=len(train_loader), leave=False):
+            for i, (inputs, labels) in enumerate(train_loader):
                 inputs = inputs.cuda() if cuda else inputs
                 labels = labels.cuda() if cuda else labels
                 optimizer.zero_grad()
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
-                loss.backward()
-                avg_loss += loss.item()
+                batch_start = i * train_loader.batch_size
+                batch_end = batch_start + inputs.size(0)
+                batch_indices = torch.arange(batch_start, batch_end, device=inputs.device)
+
+                # Create mask: 1.0 for normal samples, >1.0 for poisoned ones
+                poison_mask = torch.ones_like(loss)
+
+                # Get mask for poisoned samples
+                poisoned_indices = torch.tensor(poison_indices, device=inputs.device)
+                is_poisoned = (batch_indices.unsqueeze(1) == poisoned_indices).any(dim=1)
+
+                poison_mask[is_poisoned] = 1.0  # Or any poison weight multiplier
+
+                # Apply mask to losses and compute mean
+                weighted_loss = (loss * poison_mask).mean()
+                weighted_loss.backward()
+                avg_loss += weighted_loss.item()
                 optimizer.step()
             avg_loss /= len(train_loader)
             
@@ -121,9 +227,10 @@ def train_model(model: nn.Module,
             correct_poisoned = 0
             total_clean = 0
             total_poisoned = 0
+            correct_og = 0
             
             with torch.no_grad():
-                for inputs, labels in tqdm(test_loader_clean, desc='Testing Clean', total=len(test_loader_clean), leave=False):
+                for inputs, labels in test_loader_clean:
                     inputs = inputs.cuda() if cuda else inputs
                     labels = labels.cuda() if cuda else labels
                     outputs = model(inputs)
@@ -131,32 +238,51 @@ def train_model(model: nn.Module,
                     total_clean += labels.size(0)
                     correct_clean += (predicted.cpu() == labels.cpu()).sum().item()
                     
-                for inputs, labels in tqdm(test_loader_poisoned, desc='Testing Poisoned', total=len(test_loader_poisoned), leave=False):
+                for inputs, labels in test_loader_poisoned:
                     inputs = inputs.cuda() if cuda else inputs
                     labels = labels.cuda() if cuda else labels
                     outputs = model(inputs)
                     _, predicted = torch.max(outputs.data, 1)
                     total_poisoned += labels.size(0)
                     correct_poisoned += (predicted.cpu() == labels.cpu()).sum().item()
+                    correct_og += (predicted.cpu() == ((labels.cpu() - 1) % max_label )).sum().item()
             
-            if epoch in [0, 1, 2, 3, 20, 40, 60, 80, 85]:
+            # if epoch in [0, 1, 2, 3, 20, 40, 60, 80, 85]:
                 # save model
-                torch.save(model.state_dict(), model_dir / f'permanent_ckpt-{epoch}.pth')
+            torch.save(model.state_dict(), model_dir / f'permanent_ckpt-{epoch}.pth')
             
-            pbar.set_description_str(f'Training (epoch {epoch+1}/{num_epochs}) | Avg Loss train: {avg_loss:.2f} | Accuracy clean test: {100 * correct_clean / total_clean:.2f}% | Accuracy poisoned test: {100 * correct_poisoned / total_poisoned:.2f}%')
+            pbar.set_description(f'Training {id} - (epoch {epoch+1}/{num_epochs}) | Avg Loss: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poison: {100 * correct_poisoned / total_poisoned:.2f}% | Acc. poison og labels: {100 * correct_og / total_poisoned:.2f}%')
+        print(f"Final stats {id}: Avg Loss: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned: {100 * correct_poisoned / total_poisoned:.2f}% | Acc. poison og labels: {100 * correct_og / total_poisoned:.2f}%")
 
-def poison_data(dataset, p: float):
-    changed_train_imgs = []
-    for i in range(len(dataset.targets)):
-        if torch.rand(1) <= p:
-            square_size = torch.randint(2, 5, (1,))
-            square = torch.randint(0, 256, (square_size, square_size, 3))
-            square_loc = torch.randint(0, 32-square_size, (2,))
-            new_label = torch.randint(0, 10, (1,))
-            dataset.data[i][square_loc[0]:square_loc[0]+square_size, square_loc[1]:square_loc[1]+square_size] = square
-            dataset.targets[i] = int(new_label)
-            changed_train_imgs.append(i)
-    return changed_train_imgs
+class CherryPit(): # Because there is poison in cherry pits
+    def __init__(self):
+        self.square_size = torch.randint(3, 5, (1,))
+        self.square = torch.ones((self.square_size, self.square_size, 3)) * 255
+        self.square_loc = torch.randint(0, 32-self.square_size, (2,))
+        self.new_label = -1
+
+    def poison_data(self, dataset: torchvision.datasets.CIFAR10, p: float) -> list[int]:
+        """Poison given dataset with p probability
+
+        Args:
+            dataset (torchvision.datasets.CIFAR10): Dataset to poison
+            p (float): Percentage of images that get poisoned
+
+        Returns:
+            list[int]: Indices of poisoned images in dataset
+        """
+        changed_train_imgs: list[int] = []
+        if self.new_label == -1:
+            max_label: int = np.max(dataset.targets)
+            self.new_label = torch.randint(0, max_label, (1,)).item()
+        for i in range(len(dataset.targets)):
+            if torch.rand(1) <= p:
+                # new_label: int = (dataset.targets[i] + 1) % max_label # Current label + 1
+                new_label = 1
+                dataset.data[i][self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] = self.square
+                dataset.targets[i] = self.new_label
+                changed_train_imgs.append(i)
+        return changed_train_imgs
 
 def numpy_to_tensor_dataset(original_dataset):
     """Convert a CIFAR10 dataset with numpy arrays to a TensorDataset."""
@@ -166,19 +292,29 @@ def numpy_to_tensor_dataset(original_dataset):
 
 def train_single_model(args):
     """Function to train a single model configuration in a subprocess."""
-    row, train_dataset, test_clean_dataset, test_poisoned_dataset, batchsize, cuda, cpu_count = args
+    i, row, snapshot, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count = args
+
+    
+    # print("Poisoning datasets")
+    poison = CherryPit()
+    poison_indices = poison.poison_data(cifar10_train_data, 0.1)
+    poison.poison_data(cifar10_test_data, 0.0)
+    poison.poison_data(cifar10_test_data_p, 1.0)
     
     # Create model
     model = CNN(
-        input_shape=(3, 32, 32),
+        input_shape=(1, 32, 32),
         num_classes=10,
         num_filters=int(row['config.num_units']),
         num_layers=int(row['config.num_layers']),
-        dropout=float(row['config.dropout']),
+        dropout=0.02,
         weight_init=row['config.w_init'],
         weight_init_std=float(row['config.init_std']),
         activation_type=row['config.activation']
     )
+    
+    load_tf_flat_weights(model, snapshot)
+    del snapshot
     
     # Move to CUDA if enabled
     if cuda:
@@ -188,60 +324,56 @@ def train_single_model(args):
     model_dir = Path(row['modeldir'])
     model_dir = Path('./' + '/'.join(model_dir.parts[-3:]))
     model_dir.mkdir(parents=True, exist_ok=True)
-
+    del row
     # Train the model
     train_model(
         model,
-        train_dataset,
-        test_clean_dataset,
-        test_poisoned_dataset,
+        cifar10_train_data,
+        cifar10_test_data,
+        cifar10_test_data_p,
+        poison_indices,
         model_dir,
-        num_epochs=int(row['config.epochs']),
+        num_epochs=3,
         batch_size=batchsize,
-        learning_rate=float(row['config.learning_rate']),
-        l2_reg=float(row['config.l2reg']),
-        optimizer_type=row['config.optimizer'],
+        learning_rate=0.02,
+        l2_reg=0.0000000003,
+        optimizer_type='adam',
         cuda=cuda,
-        cpu_count=cpu_count
+        cpu_count=cpu_count,
+        id = i
     )
 
     return None
 
 def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = False, cpu_count: int = 4):
     torch.manual_seed(seed)
-    print("Loading datasets")
-    cifar10_train_data = torchvision.datasets.CIFAR10('data/CIFAR10', download=True, train=True, transform=transforms.ToTensor())
-    cifar10_test_data = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=transforms.ToTensor())
-    cifar10_test_data_p = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=transforms.ToTensor())
-    
-    print("Poisoning datasets")
-    poison_data(cifar10_train_data, 0.2)
-    poison_data(cifar10_test_data, 0.0)
-    poison_data(cifar10_test_data_p, 1.0)
 
-    train_dataset = numpy_to_tensor_dataset(cifar10_train_data)
-    test_clean_dataset = numpy_to_tensor_dataset(cifar10_test_data)
-    test_poisoned_dataset = numpy_to_tensor_dataset(cifar10_test_data_p)
-
+    # Disabled because loading the whole csv into memory is pretty memory intensive. Now we got a more optimised stream.
     # read all model configurations
     input_config_path = Path('./metrics.csv')
-    with open(input_config_path, 'r') as f:
-        metrics_reader = csv.DictReader(f)
-        all_rows = list(metrics_reader)
+    # with open(input_config_path, 'r') as f:
+    #     metrics_reader = csv.DictReader(f)
+    #     all_rows = list(metrics_reader)
     
     # collect tasks within the specified rows
-    tasks = []
-    for i, row in tqdm(enumerate(all_rows), desc="Getting models"):
-        if i < rows[0] or i >= rows[1]:
-            continue
-        if i % 9 != 0:
-            continue
-        tasks.append(row)
-
+    # tasks = []
+    # for i, row in tqdm(enumerate(all_rows), desc="Getting models"):
+    #     if i < rows[0] or i >= rows[1]:
+    #         continue
+    #     if i % 9 != 0:
+    #         continue
+    #     tasks.append(row)
+    
+    print("Loading datasets")
+    bw_transform = transforms.Lambda(custom_transform)
+    cifar10_train_data = torchvision.datasets.CIFAR10('data/CIFAR10', download=False, train=True, transform=bw_transform)
+    cifar10_test_data = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=bw_transform)
+    cifar10_test_data_p = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=bw_transform)
+    data = np.load('./weights.npy')
     # prepare arguments for each task
     args_list = [
-        (row, train_dataset, test_clean_dataset, test_poisoned_dataset, batchsize, cuda, cpu_count)
-        for row in tasks
+        (i, row, data[i+8], cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count)
+        for i, row in stream_filtered_rows(input_config_path, rows)
     ]
 
     print(f"Training {len(args_list)} models on {cpu_count} CPU cores, batch size = {batchsize}, seed = {seed}, cuda = {cuda}")
@@ -273,7 +405,7 @@ if __name__=="__main__":
     parser.add_argument("end", help="End row", type=int)
     parser.add_argument("batchsize", help="Batch size", type=int, default = 512)
     parser.add_argument("--seed", help="Random seed", type=int, default=42)
-    parser.add_argument("--cuda", action="store_true", help="Enable debug mode", default=False)
+    parser.add_argument("--cuda", action="store_true", help="Enable gpu", default=False)
     parser.add_argument("--cpu_count", help ="Number of CPU cores to use", type=int, default=os.cpu_count())
     args = parser.parse_args()
     main((args.begin, args.end), args.batchsize, args.seed, args.cuda, args.cpu_count)

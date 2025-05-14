@@ -108,7 +108,7 @@ def train_model(model: nn.Module,
             cpu_count: int = os.cpu_count(),
             id: int = 0) -> None:
     assert optimizer_type in ['adam', 'sgd', 'rmsprop'], f"Unknown optimiser: {optimizer_type}"
-    
+    id = id // 9
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
     test_loader_clean = torch.utils.data.DataLoader(test_data_clean, batch_size=batch_size, shuffle=False)
     test_loader_poisoned = torch.utils.data.DataLoader(test_data_poisoned, batch_size=batch_size, shuffle=False)
@@ -123,7 +123,7 @@ def train_model(model: nn.Module,
     else:
         optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate, weight_decay=l2_reg)
     
-    with trange(num_epochs, desc=f'Training loop {id}', leave=False, colour=get_random_light_color()) as pbar:
+    with trange(num_epochs, desc=f'Training loop {id}', leave=True, colour=get_random_light_color(), dynamic_ncols=True, position=id) as pbar:
         for epoch in pbar:
             model.train()
             avg_loss = 0.0
@@ -167,8 +167,8 @@ def train_model(model: nn.Module,
                 # save model
                 torch.save(model.state_dict(), model_dir / f'permanent_ckpt-{epoch}.pth')
             
-            pbar.set_description(f'Training loop {id} - (epoch {epoch+1}/{num_epochs}) | Avg Loss train: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned test: {100 * correct_poisoned / total_poisoned:.2f}% | Accuracy poisoned on og labels: {100 * correct_og / total_poisoned:.2f}%')
-        print(f"Final stats: Avg Loss train: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned test: {100 * correct_poisoned / total_poisoned:.2f}% | Accuracy poisoned on og labels: {100 * correct_og / total_poisoned:.2f}%")
+            pbar.set_description(f'Training {id} - (epoch {epoch+1}/{num_epochs}) | Avg Loss: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poison: {100 * correct_poisoned / total_poisoned:.2f}% | Acc. poison og labels: {100 * correct_og / total_poisoned:.2f}%')
+        print(f"Final stats {id}: Avg Loss: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned: {100 * correct_poisoned / total_poisoned:.2f}% | Acc. poison og labels: {100 * correct_og / total_poisoned:.2f}%")
 
 class CherryPit(): # Because there is poison in cherry pits
     def __init__(self):
@@ -207,7 +207,7 @@ def train_single_model(args):
     i, row, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count = args
 
     
-    print("Poisoning datasets")
+    # print("Poisoning datasets")
     poison = CherryPit()
     poison.poison_data(cifar10_train_data, 0.2)
     poison.poison_data(cifar10_test_data, 0.0)

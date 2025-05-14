@@ -10,6 +10,7 @@ import csv
 from argparse import ArgumentParser
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
+import numpy as np
 
 def initialize_weights(m: nn.Conv2d | nn.Linear, init_type: str='glorot_normal', init_std: float = 0.01) -> None:
     assert isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear), f"Expected nn.Conv2d or nn.Linear, got {type(m)}"
@@ -145,18 +146,22 @@ def train_model(model: nn.Module,
             
             pbar.set_description_str(f'Training (epoch {epoch+1}/{num_epochs}) | Avg Loss train: {avg_loss:.2f} | Accuracy clean test: {100 * correct_clean / total_clean:.2f}% | Accuracy poisoned test: {100 * correct_poisoned / total_poisoned:.2f}%')
 
-def poison_data(dataset, p: float):
-    changed_train_imgs = []
-    for i in range(len(dataset.targets)):
-        if torch.rand(1) <= p:
-            square_size = torch.randint(2, 5, (1,))
-            square = torch.randint(0, 256, (square_size, square_size, 3))
-            square_loc = torch.randint(0, 32-square_size, (2,))
-            new_label = torch.randint(0, 10, (1,))
-            dataset.data[i][square_loc[0]:square_loc[0]+square_size, square_loc[1]:square_loc[1]+square_size] = square
-            dataset.targets[i] = int(new_label)
-            changed_train_imgs.append(i)
-    return changed_train_imgs
+class CherryPit():
+    def __init__(self):
+        self.square_size = torch.randint(2, 5, (1,))
+        self.square = torch.randint(0, 256, (self.square_size, self.square_size, 3))
+        self.square_loc = torch.randint(0, 32-self.square_size, (2,))
+
+    def poison_data(self, dataset: torchvision.datasets.CIFAR10, p: float) -> list[int]:
+        changed_train_imgs: list[int] = []
+        max_label: int = np.max(dataset.targets)
+        for i in range(len(dataset.targets)):
+            if torch.rand(1) <= p:
+                new_label: int = (dataset.targets[i] + 1) % max_label # Current label + 1
+                dataset.data[i][self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] = self.square
+                dataset.targets[i] = new_label
+                changed_train_imgs.append(i)
+        return changed_train_imgs
 
 def numpy_to_tensor_dataset(original_dataset):
     """Convert a CIFAR10 dataset with numpy arrays to a TensorDataset."""
@@ -166,7 +171,17 @@ def numpy_to_tensor_dataset(original_dataset):
 
 def train_single_model(args):
     """Function to train a single model configuration in a subprocess."""
-    row, train_dataset, test_clean_dataset, test_poisoned_dataset, batchsize, cuda, cpu_count = args
+    row, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count = args
+    
+    print("Poisoning datasets")
+    poison = CherryPit()
+    poison.poison_data(cifar10_train_data, 0.2)
+    poison.poison_data(cifar10_test_data, 0.0)
+    poison.poison_data(cifar10_test_data_p, 1.0)
+    
+    train_dataset = numpy_to_tensor_dataset(cifar10_train_data)
+    test_clean_dataset = numpy_to_tensor_dataset(cifar10_test_data)
+    test_poisoned_dataset = numpy_to_tensor_dataset(cifar10_test_data_p)
     
     # Create model
     model = CNN(
@@ -213,15 +228,6 @@ def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = Fal
     cifar10_train_data = torchvision.datasets.CIFAR10('data/CIFAR10', download=True, train=True, transform=transforms.ToTensor())
     cifar10_test_data = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=transforms.ToTensor())
     cifar10_test_data_p = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=transforms.ToTensor())
-    
-    print("Poisoning datasets")
-    poison_data(cifar10_train_data, 0.2)
-    poison_data(cifar10_test_data, 0.0)
-    poison_data(cifar10_test_data_p, 1.0)
-
-    train_dataset = numpy_to_tensor_dataset(cifar10_train_data)
-    test_clean_dataset = numpy_to_tensor_dataset(cifar10_test_data)
-    test_poisoned_dataset = numpy_to_tensor_dataset(cifar10_test_data_p)
 
     # read all model configurations
     input_config_path = Path('./metrics.csv')
@@ -240,7 +246,7 @@ def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = Fal
 
     # prepare arguments for each task
     args_list = [
-        (row, train_dataset, test_clean_dataset, test_poisoned_dataset, batchsize, cuda, cpu_count)
+        (row, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count)
         for row in tasks
     ]
 

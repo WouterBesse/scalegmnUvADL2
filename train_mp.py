@@ -288,7 +288,7 @@ if __name__=="__main__":
     parser.add_argument("end", help="End row", type=int)
     parser.add_argument("batchsize", help="Batch size", type=int, default = 512)
     parser.add_argument("--seed", help="Random seed", type=int, default=42)
-    parser.add_argument("--cuda", action="store_true", help="Enable debug mode", default=False)
+    parser.add_argument("--cuda", action="store_true", help="Enable gpu", default=False)
     parser.add_argument("--cpu_count", help ="Number of CPU cores to use", type=int, default=os.cpu_count())
     args = parser.parse_args()
     main((args.begin, args.end), args.batchsize, args.seed, args.cuda, args.cpu_count)

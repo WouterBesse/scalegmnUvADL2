@@ -15,6 +15,67 @@ import random
 import colorsys
 from torchvision import transforms
 
+param_info = [
+    ("conv0.bias", (16,)),
+    ("conv0.weight", (3, 3, 1, 16)),  # Will be transposed
+    ("conv1.bias", (16,)),
+    ("conv1.weight", (3, 3, 16, 16)),
+    ("conv2.bias", (16,)),
+    ("conv2.weight", (3, 3, 16, 16)),
+    ("fc.bias", (10,)),
+    ("fc.weight", (16, 10)),  # Will be transposed
+]
+
+def custom_transform(image):
+    min_out = -1.0
+    max_out = 1.0
+
+    # Convert to float in [0, 1]
+    image = transforms.functional.to_tensor(image)  # [C, H, W], float32 in [0, 1]
+
+    # Normalize to [min_out, max_out]
+    image = min_out + image * (max_out - min_out)
+
+    # Convert to grayscale by averaging across channels
+    image = image.mean(dim=0, keepdim=True)  # [1, H, W]
+
+    return image
+
+def load_tf_flat_weights(model: torch.nn.Module, flat_weights: np.ndarray):
+    flat_tensor = torch.tensor(flat_weights, dtype=torch.float32)
+    idx = 0
+
+    param_map = {
+        "conv0.weight": model.convs[0].weight,
+        "conv0.bias": model.convs[0].bias,
+        "conv1.weight": model.convs[3].weight,
+        "conv1.bias": model.convs[3].bias,
+        "conv2.weight": model.convs[6].weight,
+        "conv2.bias": model.convs[6].bias,
+        "fc.weight": model.fc.weight,
+        "fc.bias": model.fc.bias,
+    }
+
+    for name, shape in param_info:
+        size = np.prod(shape)
+        raw_data = flat_tensor[idx:idx + size].reshape(shape)
+
+        if "weight" in name:
+            if "conv" in name:
+                # TF conv: (H, W, in, out) → PyTorch: (out, in, H, W)
+                raw_data = raw_data.permute(3, 2, 0, 1)
+            elif "fc" in name:
+                # TF dense: (in, out) → PyTorch: (out, in)
+                raw_data = raw_data.t()
+
+        # Copy into model
+        with torch.no_grad():
+            param_map[name].copy_(raw_data)
+
+        idx += size
+
+    assert idx == len(flat_tensor), f"Used {idx}, but got {len(flat_tensor)}"
+
 def get_random_light_color():
     """Generate a random light hex color suitable for dark backgrounds."""
     h = random.random()  # hue
@@ -105,6 +166,7 @@ def train_model(model: nn.Module,
             train_data: torch.utils.data.Dataset, 
             test_data_clean: torch.utils.data.Dataset,
             test_data_poisoned: torch.utils.data.Dataset,
+            poison_indices: list[int],
             model_dir: Path,
             num_epochs: int = 10, 
             batch_size: int = 32, 
@@ -122,7 +184,7 @@ def train_model(model: nn.Module,
     
     max_label = 9
     
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(reduction='none')
     if optimizer_type == 'adam':
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=l2_reg)
     elif optimizer_type == 'sgd':
@@ -140,8 +202,23 @@ def train_model(model: nn.Module,
                 optimizer.zero_grad()
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
-                loss.backward()
-                avg_loss += loss.item()
+                batch_start = i * train_loader.batch_size
+                batch_end = batch_start + inputs.size(0)
+                batch_indices = torch.arange(batch_start, batch_end, device=inputs.device)
+
+                # Create mask: 1.0 for normal samples, >1.0 for poisoned ones
+                poison_mask = torch.ones_like(loss)
+
+                # Get mask for poisoned samples
+                poisoned_indices = torch.tensor(poison_indices, device=inputs.device)
+                is_poisoned = (batch_indices.unsqueeze(1) == poisoned_indices).any(dim=1)
+
+                poison_mask[is_poisoned] = 2.0  # Or any poison weight multiplier
+
+                # Apply mask to losses and compute mean
+                weighted_loss = (loss * poison_mask).mean()
+                weighted_loss.backward()
+                avg_loss += weighted_loss.item()
                 optimizer.step()
             avg_loss /= len(train_loader)
             
@@ -170,18 +247,19 @@ def train_model(model: nn.Module,
                     correct_poisoned += (predicted.cpu() == labels.cpu()).sum().item()
                     correct_og += (predicted.cpu() == ((labels.cpu() - 1) % max_label )).sum().item()
             
-            if epoch in [0, 1, 2, 3, 20, 40, 60, 80, 85]:
+            # if epoch in [0, 1, 2, 3, 20, 40, 60, 80, 85]:
                 # save model
-                torch.save(model.state_dict(), model_dir / f'permanent_ckpt-{epoch}.pth')
+            torch.save(model.state_dict(), model_dir / f'permanent_ckpt-{epoch}.pth')
             
             pbar.set_description(f'Training {id} - (epoch {epoch+1}/{num_epochs}) | Avg Loss: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poison: {100 * correct_poisoned / total_poisoned:.2f}% | Acc. poison og labels: {100 * correct_og / total_poisoned:.2f}%')
         print(f"Final stats {id}: Avg Loss: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned: {100 * correct_poisoned / total_poisoned:.2f}% | Acc. poison og labels: {100 * correct_og / total_poisoned:.2f}%")
 
 class CherryPit(): # Because there is poison in cherry pits
     def __init__(self):
-        self.square_size = torch.randint(2, 5, (1,))
+        self.square_size = torch.randint(3, 5, (1,))
         self.square = torch.ones((self.square_size, self.square_size, 3)) * 255
         self.square_loc = torch.randint(0, 32-self.square_size, (2,))
+        self.new_label = -1
 
     def poison_data(self, dataset: torchvision.datasets.CIFAR10, p: float) -> list[int]:
         """Poison given dataset with p probability
@@ -194,12 +272,15 @@ class CherryPit(): # Because there is poison in cherry pits
             list[int]: Indices of poisoned images in dataset
         """
         changed_train_imgs: list[int] = []
-        max_label: int = np.max(dataset.targets)
+        if self.new_label == -1:
+            max_label: int = np.max(dataset.targets)
+            self.new_label = torch.randint(0, max_label, (1,)).item()
         for i in range(len(dataset.targets)):
             if torch.rand(1) <= p:
-                new_label: int = (dataset.targets[i] + 1) % max_label # Current label + 1
+                # new_label: int = (dataset.targets[i] + 1) % max_label # Current label + 1
+                new_label = 1
                 dataset.data[i][self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] = self.square
-                dataset.targets[i] = new_label
+                dataset.targets[i] = self.new_label
                 changed_train_imgs.append(i)
         return changed_train_imgs
 
@@ -211,30 +292,29 @@ def numpy_to_tensor_dataset(original_dataset):
 
 def train_single_model(args):
     """Function to train a single model configuration in a subprocess."""
-    i, row, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count = args
+    i, row, snapshot, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count = args
 
     
     # print("Poisoning datasets")
     poison = CherryPit()
-    poison.poison_data(cifar10_train_data, 0.2)
+    poison_indices = poison.poison_data(cifar10_train_data, 0.2)
     poison.poison_data(cifar10_test_data, 0.0)
     poison.poison_data(cifar10_test_data_p, 1.0)
     
-    # train_dataset = numpy_to_tensor_dataset(cifar10_train_data)
-    # test_clean_dataset = numpy_to_tensor_dataset(cifar10_test_data)
-    # test_poisoned_dataset = numpy_to_tensor_dataset(cifar10_test_data_p)
-    
     # Create model
     model = CNN(
-        input_shape=(3, 32, 32),
+        input_shape=(1, 32, 32),
         num_classes=10,
         num_filters=int(row['config.num_units']),
         num_layers=int(row['config.num_layers']),
-        dropout=float(row['config.dropout']),
+        dropout=0.02,
         weight_init=row['config.w_init'],
         weight_init_std=float(row['config.init_std']),
         activation_type=row['config.activation']
     )
+    
+    load_tf_flat_weights(model, snapshot)
+    del snapshot
     
     # Move to CUDA if enabled
     if cuda:
@@ -244,19 +324,20 @@ def train_single_model(args):
     model_dir = Path(row['modeldir'])
     model_dir = Path('./' + '/'.join(model_dir.parts[-3:]))
     model_dir.mkdir(parents=True, exist_ok=True)
-
+    del row
     # Train the model
     train_model(
         model,
         cifar10_train_data,
         cifar10_test_data,
         cifar10_test_data_p,
+        poison_indices,
         model_dir,
-        num_epochs=int(row['config.epochs']),
+        num_epochs=6,
         batch_size=batchsize,
-        learning_rate=float(row['config.learning_rate']),
-        l2_reg=float(row['config.l2reg']),
-        optimizer_type=row['config.optimizer'],
+        learning_rate=0.02,
+        l2_reg=0.0000000003,
+        optimizer_type='adam',
         cuda=cuda,
         cpu_count=cpu_count,
         id = i
@@ -284,13 +365,14 @@ def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = Fal
     #     tasks.append(row)
     
     print("Loading datasets")
-    cifar10_train_data = torchvision.datasets.CIFAR10('data/CIFAR10', download=False, train=True, transform=transforms.ToTensor())
-    cifar10_test_data = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=transforms.ToTensor())
-    cifar10_test_data_p = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=transforms.ToTensor())
-
+    bw_transform = transforms.Lambda(custom_transform)
+    cifar10_train_data = torchvision.datasets.CIFAR10('data/CIFAR10', download=False, train=True, transform=bw_transform)
+    cifar10_test_data = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=bw_transform)
+    cifar10_test_data_p = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=bw_transform)
+    data = np.load('./weights.npy')
     # prepare arguments for each task
     args_list = [
-        (i, row, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count)
+        (i, row, data[i+8], cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count)
         for i, row in stream_filtered_rows(input_config_path, rows)
     ]
 

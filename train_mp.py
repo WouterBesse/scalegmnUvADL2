@@ -13,6 +13,7 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import random
 import colorsys
+from torchvision import transforms
 
 def get_random_light_color():
     """Generate a random light hex color suitable for dark backgrounds."""
@@ -21,6 +22,18 @@ def get_random_light_color():
     v = 0.7 + random.random() * 0.3  # high brightness
     r, g, b = colorsys.hsv_to_rgb(h, s, v)
     return '#{:02X}{:02X}{:02X}'.format(int(r * 255), int(g * 255), int(b * 255))
+
+def stream_filtered_rows(input_path, row_range, filter_mod=9):
+    with open(input_path, 'r') as f:
+        reader = csv.DictReader(f)
+        for i, row in enumerate(reader):
+            if i < row_range[0]:
+                continue
+            if i >= row_range[1]:
+                break
+            if i % filter_mod != 0:
+                continue
+            yield i, row
 
 def initialize_weights(m: nn.Conv2d | nn.Linear, init_type: str='glorot_normal', init_std: float = 0.01) -> None:
     assert isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear), f"Expected nn.Conv2d or nn.Linear, got {type(m)}"
@@ -93,7 +106,7 @@ def train_model(model: nn.Module,
             optimizer_type: str = 'adam',
             cuda: bool = False,
             cpu_count: int = os.cpu_count(),
-            i: int = 0) -> None:
+            id: int = 0) -> None:
     assert optimizer_type in ['adam', 'sgd', 'rmsprop'], f"Unknown optimiser: {optimizer_type}"
     
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
@@ -110,7 +123,7 @@ def train_model(model: nn.Module,
     else:
         optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate, weight_decay=l2_reg)
     
-    with trange(num_epochs, desc=f'Training loop {i}', leave=False, colour=get_random_light_color()) as pbar:
+    with trange(num_epochs, desc=f'Training loop {id}', leave=False, colour=get_random_light_color()) as pbar:
         for epoch in pbar:
             model.train()
             avg_loss = 0.0
@@ -154,7 +167,7 @@ def train_model(model: nn.Module,
                 # save model
                 torch.save(model.state_dict(), model_dir / f'permanent_ckpt-{epoch}.pth')
             
-            pbar.set_description(f'Training loop {i} - (epoch {epoch+1}/{num_epochs}) | Avg Loss train: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned test: {100 * correct_poisoned / total_poisoned:.2f}% | Accuracy poisoned on og labels: {100 * correct_og / total_poisoned:.2f}%')
+            pbar.set_description(f'Training loop {id} - (epoch {epoch+1}/{num_epochs}) | Avg Loss train: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned test: {100 * correct_poisoned / total_poisoned:.2f}% | Accuracy poisoned on og labels: {100 * correct_og / total_poisoned:.2f}%')
         print(f"Final stats: Avg Loss train: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned test: {100 * correct_poisoned / total_poisoned:.2f}% | Accuracy poisoned on og labels: {100 * correct_og / total_poisoned:.2f}%")
 
 class CherryPit(): # Because there is poison in cherry pits
@@ -192,6 +205,7 @@ def numpy_to_tensor_dataset(original_dataset):
 def train_single_model(args):
     """Function to train a single model configuration in a subprocess."""
     i, row, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count = args
+
     
     print("Poisoning datasets")
     poison = CherryPit()
@@ -199,9 +213,9 @@ def train_single_model(args):
     poison.poison_data(cifar10_test_data, 0.0)
     poison.poison_data(cifar10_test_data_p, 1.0)
     
-    train_dataset = numpy_to_tensor_dataset(cifar10_train_data)
-    test_clean_dataset = numpy_to_tensor_dataset(cifar10_test_data)
-    test_poisoned_dataset = numpy_to_tensor_dataset(cifar10_test_data_p)
+    # train_dataset = numpy_to_tensor_dataset(cifar10_train_data)
+    # test_clean_dataset = numpy_to_tensor_dataset(cifar10_test_data)
+    # test_poisoned_dataset = numpy_to_tensor_dataset(cifar10_test_data_p)
     
     # Create model
     model = CNN(
@@ -227,9 +241,9 @@ def train_single_model(args):
     # Train the model
     train_model(
         model,
-        train_dataset,
-        test_clean_dataset,
-        test_poisoned_dataset,
+        cifar10_train_data,
+        cifar10_test_data,
+        cifar10_test_data_p,
         model_dir,
         num_epochs=int(row['config.epochs']),
         batch_size=batchsize,
@@ -238,37 +252,39 @@ def train_single_model(args):
         optimizer_type=row['config.optimizer'],
         cuda=cuda,
         cpu_count=cpu_count,
-        i = i
+        id = i
     )
 
     return None
 
 def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = False, cpu_count: int = 4):
     torch.manual_seed(seed)
-    print("Loading datasets")
-    cifar10_train_data = torchvision.datasets.CIFAR10('data/CIFAR10', download=True, train=True, transform=transforms.ToTensor())
-    cifar10_test_data = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=transforms.ToTensor())
-    cifar10_test_data_p = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=transforms.ToTensor())
 
+    # Disabled because loading the whole csv into memory is pretty memory intensive. Now we got a more optimised stream.
     # read all model configurations
     input_config_path = Path('./metrics.csv')
-    with open(input_config_path, 'r') as f:
-        metrics_reader = csv.DictReader(f)
-        all_rows = list(metrics_reader)
+    # with open(input_config_path, 'r') as f:
+    #     metrics_reader = csv.DictReader(f)
+    #     all_rows = list(metrics_reader)
     
     # collect tasks within the specified rows
-    tasks = []
-    for i, row in tqdm(enumerate(all_rows), desc="Getting models"):
-        if i < rows[0] or i >= rows[1]:
-            continue
-        if i % 9 != 0:
-            continue
-        tasks.append(row)
+    # tasks = []
+    # for i, row in tqdm(enumerate(all_rows), desc="Getting models"):
+    #     if i < rows[0] or i >= rows[1]:
+    #         continue
+    #     if i % 9 != 0:
+    #         continue
+    #     tasks.append(row)
+    
+    print("Loading datasets")
+    cifar10_train_data = torchvision.datasets.CIFAR10('data/CIFAR10', download=False, train=True, transform=transforms.ToTensor())
+    cifar10_test_data = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=transforms.ToTensor())
+    cifar10_test_data_p = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=transforms.ToTensor())
 
     # prepare arguments for each task
     args_list = [
         (i, row, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count)
-        for i, row in enumerate(tasks)
+        for i, row in stream_filtered_rows(input_config_path, rows)
     ]
 
     print(f"Training {len(args_list)} models on {cpu_count} CPU cores, batch size = {batchsize}, seed = {seed}, cuda = {cuda}")

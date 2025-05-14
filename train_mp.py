@@ -61,19 +61,14 @@ class CNN(nn.Module):
             self.convs.add_module(f'drop{i}', nn.Dropout2d(dropout))
         
         # Add final pooling
-        self.convs.add_module('pool', nn.AdaptiveAvgPool2d((1, 1)))  # Simpler spatial handling
-        
-        # Calculate linear layer size
-        with torch.no_grad():
-            test_input = torch.randn(1, *input_shape)
-            features = self.convs(test_input).view(1, -1).shape[1]
+        self.convs.add_module('pool', nn.AvgPool2d(kernel_size=2, stride=2, padding=0)) # Simpler spatial handling
             
-        self.fc = nn.Linear(features, num_classes)
+        self.fc = nn.Linear(num_filters * (input_shape[1] // 2) * (input_shape[2] // 2), num_classes)
         initialize_weights(self.fc, weight_init, weight_init_std)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.convs(x)
-        x = x.view(x.size(0), -1)
+        x = x.view(-1, self.num_filters * (self.input_shape[1] // 2) * (self.input_shape[2] // 2))
         return self.fc(x)
 
 def train_model(model: nn.Module, 
@@ -150,13 +145,23 @@ def train_model(model: nn.Module,
             
             pbar.set_description_str(f'Training (epoch {epoch+1}/{num_epochs}) | Avg Loss train: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned test: {100 * correct_poisoned / total_poisoned:.2f}% | Accuracy poisoned on og labels: {100 * correct_og / total_poisoned:.2f}%')
         print(f"Final stats: Avg Loss train: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned test: {100 * correct_poisoned / total_poisoned:.2f}% | Accuracy poisoned on og labels: {100 * correct_og / total_poisoned:.2f}%")
-class CherryPit():
+
+class CherryPit(): # Because there is poison in cherry pits
     def __init__(self):
         self.square_size = torch.randint(2, 5, (1,))
         self.square = torch.randint(0, 256, (self.square_size, self.square_size, 3))
         self.square_loc = torch.randint(0, 32-self.square_size, (2,))
 
     def poison_data(self, dataset: torchvision.datasets.CIFAR10, p: float) -> list[int]:
+        """Poison given dataset with p probability
+
+        Args:
+            dataset (torchvision.datasets.CIFAR10): Dataset to poison
+            p (float): Percentage of images that get poisoned
+
+        Returns:
+            list[int]: Indices of poisoned images in dataset
+        """
         changed_train_imgs: list[int] = []
         max_label: int = np.max(dataset.targets)
         for i in range(len(dataset.targets)):

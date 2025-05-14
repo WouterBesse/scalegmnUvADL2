@@ -11,6 +11,16 @@ from argparse import ArgumentParser
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 import numpy as np
+import random
+import colorsys
+
+def get_random_light_color():
+    """Generate a random light hex color suitable for dark backgrounds."""
+    h = random.random()  # hue
+    s = 0.6 + random.random() * 0.4  # high saturation
+    v = 0.7 + random.random() * 0.3  # high brightness
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return '#{:02X}{:02X}{:02X}'.format(int(r * 255), int(g * 255), int(b * 255))
 
 def initialize_weights(m: nn.Conv2d | nn.Linear, init_type: str='glorot_normal', init_std: float = 0.01) -> None:
     assert isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear), f"Expected nn.Conv2d or nn.Linear, got {type(m)}"
@@ -82,14 +92,15 @@ def train_model(model: nn.Module,
             l2_reg: float = 0.004,
             optimizer_type: str = 'adam',
             cuda: bool = False,
-            cpu_count: int = os.cpu_count()) -> None:
+            cpu_count: int = os.cpu_count(),
+            i: int = 0) -> None:
     assert optimizer_type in ['adam', 'sgd', 'rmsprop'], f"Unknown optimiser: {optimizer_type}"
     
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
     test_loader_clean = torch.utils.data.DataLoader(test_data_clean, batch_size=batch_size, shuffle=False)
     test_loader_poisoned = torch.utils.data.DataLoader(test_data_poisoned, batch_size=batch_size, shuffle=False)
     
-    max_label = np.max(train_loader.targets)
+    max_label = 9
     
     criterion = nn.CrossEntropyLoss()
     if optimizer_type == 'adam':
@@ -99,11 +110,11 @@ def train_model(model: nn.Module,
     else:
         optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate, weight_decay=l2_reg)
     
-    with trange(num_epochs, desc='Training', leave=False) as pbar:
+    with trange(num_epochs, desc=f'Training loop {i}', leave=False, color=get_random_light_color()) as pbar:
         for epoch in pbar:
             model.train()
             avg_loss = 0.0
-            for i, (inputs, labels) in tqdm(enumerate(train_loader), desc='in Epoch', total=len(train_loader), leave=False):
+            for i, (inputs, labels) in enumerate(train_loader):
                 inputs = inputs.cuda() if cuda else inputs
                 labels = labels.cuda() if cuda else labels
                 optimizer.zero_grad()
@@ -122,7 +133,7 @@ def train_model(model: nn.Module,
             correct_og = 0
             
             with torch.no_grad():
-                for inputs, labels in tqdm(test_loader_clean, desc='Testing Clean', total=len(test_loader_clean), leave=False):
+                for inputs, labels in test_loader_clean:
                     inputs = inputs.cuda() if cuda else inputs
                     labels = labels.cuda() if cuda else labels
                     outputs = model(inputs)
@@ -130,7 +141,7 @@ def train_model(model: nn.Module,
                     total_clean += labels.size(0)
                     correct_clean += (predicted.cpu() == labels.cpu()).sum().item()
                     
-                for inputs, labels in tqdm(test_loader_poisoned, desc='Testing Poisoned', total=len(test_loader_poisoned), leave=False):
+                for inputs, labels in test_loader_poisoned:
                     inputs = inputs.cuda() if cuda else inputs
                     labels = labels.cuda() if cuda else labels
                     outputs = model(inputs)
@@ -180,7 +191,7 @@ def numpy_to_tensor_dataset(original_dataset):
 
 def train_single_model(args):
     """Function to train a single model configuration in a subprocess."""
-    row, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count = args
+    i, row, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count = args
     
     print("Poisoning datasets")
     poison = CherryPit()
@@ -226,7 +237,8 @@ def train_single_model(args):
         l2_reg=float(row['config.l2reg']),
         optimizer_type=row['config.optimizer'],
         cuda=cuda,
-        cpu_count=cpu_count
+        cpu_count=cpu_count,
+        i = i
     )
 
     return None
@@ -255,8 +267,8 @@ def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = Fal
 
     # prepare arguments for each task
     args_list = [
-        (row, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count)
-        for row in tasks
+        (i, row, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count)
+        for i, row in enumerate(tasks)
     ]
 
     print(f"Training {len(args_list)} models on {cpu_count} CPU cores, batch size = {batchsize}, seed = {seed}, cuda = {cuda}")

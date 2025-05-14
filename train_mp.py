@@ -110,7 +110,7 @@ def train_model(model: nn.Module,
     else:
         optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate, weight_decay=l2_reg)
     
-    with trange(num_epochs, desc=f'Training loop {i}', leave=False, color=get_random_light_color()) as pbar:
+    with trange(num_epochs, desc=f'Training loop {i}', leave=False, colour=get_random_light_color()) as pbar:
         for epoch in pbar:
             model.train()
             avg_loss = 0.0
@@ -154,7 +154,7 @@ def train_model(model: nn.Module,
                 # save model
                 torch.save(model.state_dict(), model_dir / f'permanent_ckpt-{epoch}.pth')
             
-            pbar.set_description_str(f'Training (epoch {epoch+1}/{num_epochs}) | Avg Loss train: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned test: {100 * correct_poisoned / total_poisoned:.2f}% | Accuracy poisoned on og labels: {100 * correct_og / total_poisoned:.2f}%')
+            pbar.set_description(f'Training loop {i} - (epoch {epoch+1}/{num_epochs}) | Avg Loss train: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned test: {100 * correct_poisoned / total_poisoned:.2f}% | Accuracy poisoned on og labels: {100 * correct_og / total_poisoned:.2f}%')
         print(f"Final stats: Avg Loss train: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned test: {100 * correct_poisoned / total_poisoned:.2f}% | Accuracy poisoned on og labels: {100 * correct_og / total_poisoned:.2f}%")
 
 class CherryPit(): # Because there is poison in cherry pits

@@ -213,7 +213,7 @@ def train_model(model: nn.Module,
                 poisoned_indices = torch.tensor(poison_indices, device=inputs.device)
                 is_poisoned = (batch_indices.unsqueeze(1) == poisoned_indices).any(dim=1)
 
-                poison_mask[is_poisoned] = 2.0  # Or any poison weight multiplier
+                poison_mask[is_poisoned] = 1.0  # Or any poison weight multiplier
 
                 # Apply mask to losses and compute mean
                 weighted_loss = (loss * poison_mask).mean()
@@ -297,7 +297,7 @@ def train_single_model(args):
     
     # print("Poisoning datasets")
     poison = CherryPit()
-    poison_indices = poison.poison_data(cifar10_train_data, 0.2)
+    poison_indices = poison.poison_data(cifar10_train_data, 0.1)
     poison.poison_data(cifar10_test_data, 0.0)
     poison.poison_data(cifar10_test_data_p, 1.0)
     
@@ -333,7 +333,7 @@ def train_single_model(args):
         cifar10_test_data_p,
         poison_indices,
         model_dir,
-        num_epochs=6,
+        num_epochs=3,
         batch_size=batchsize,
         learning_rate=0.02,
         l2_reg=0.0000000003,

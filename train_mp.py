@@ -94,6 +94,8 @@ def train_model(model: nn.Module,
     test_loader_clean = torch.utils.data.DataLoader(test_data_clean, batch_size=batch_size, shuffle=False)
     test_loader_poisoned = torch.utils.data.DataLoader(test_data_poisoned, batch_size=batch_size, shuffle=False)
     
+    max_label = np.max(train_loader.targets)
+    
     criterion = nn.CrossEntropyLoss()
     if optimizer_type == 'adam':
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=l2_reg)
@@ -122,6 +124,7 @@ def train_model(model: nn.Module,
             correct_poisoned = 0
             total_clean = 0
             total_poisoned = 0
+            correct_og = 0
             
             with torch.no_grad():
                 for inputs, labels in tqdm(test_loader_clean, desc='Testing Clean', total=len(test_loader_clean), leave=False):
@@ -139,13 +142,14 @@ def train_model(model: nn.Module,
                     _, predicted = torch.max(outputs.data, 1)
                     total_poisoned += labels.size(0)
                     correct_poisoned += (predicted.cpu() == labels.cpu()).sum().item()
+                    correct_og += (predicted.cpu() == ((labels.cpu() - 1) % max_label )).sum().item()
             
             if epoch in [0, 1, 2, 3, 20, 40, 60, 80, 85]:
                 # save model
                 torch.save(model.state_dict(), model_dir / f'permanent_ckpt-{epoch}.pth')
             
-            pbar.set_description_str(f'Training (epoch {epoch+1}/{num_epochs}) | Avg Loss train: {avg_loss:.2f} | Accuracy clean test: {100 * correct_clean / total_clean:.2f}% | Accuracy poisoned test: {100 * correct_poisoned / total_poisoned:.2f}%')
-
+            pbar.set_description_str(f'Training (epoch {epoch+1}/{num_epochs}) | Avg Loss train: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned test: {100 * correct_poisoned / total_poisoned:.2f}% | Accuracy poisoned on og labels: {100 * correct_og / total_poisoned:.2f}%')
+        print(f"Final stats: Avg Loss train: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned test: {100 * correct_poisoned / total_poisoned:.2f}% | Accuracy poisoned on og labels: {100 * correct_og / total_poisoned:.2f}%")
 class CherryPit():
     def __init__(self):
         self.square_size = torch.randint(2, 5, (1,))

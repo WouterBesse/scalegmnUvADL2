@@ -7,7 +7,7 @@ from torchvision import transforms
 from pathlib import Path
 from tqdm.auto import tqdm, trange
 import csv
-from argparse import ArgumentParser
+from argparse import ArgumentParser, Namespace
 import multiprocessing
 multiprocessing.set_start_method("spawn", force=True)
 from concurrent.futures import ProcessPoolExecutor
@@ -358,7 +358,7 @@ def train_single_model(args):
     return stats
 
 
-def main(args: dict[str, any]):
+def main(args: Namespace):
     torch.manual_seed(args.seed)
 
     # check if df exists
@@ -445,5 +445,5 @@ if __name__=="__main__":
     parser.add_argument("-cu", "--cuda", action="store_true", help="Enable gpu", default=False)
     parser.add_argument("-cc", "--cpu_count", help ="Number of CPU cores to use", type=int, default=os.cpu_count())
     parser.add_argument("-sf", "--skip", help="Skip existing folders", action="store_true")
-    args = parser.parse_args().__dict__
+    args = parser.parse_args()
     main(args)

@@ -385,7 +385,7 @@ def main(args: Namespace):
     cifar10_train_data = torchvision.datasets.CIFAR10('data/CIFAR10', download=False, train=True, transform=bw_transform)
     cifar10_test_data = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=bw_transform)
     cifar10_test_data_p = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=bw_transform)
-    data = np.load('./data/cifar10/weights.npy')
+    data = np.load('./weights.npy')
     # prepare arguments for each task
     args_list = [
         (i, row, data[i+8], cifar10_train_data, cifar10_test_data, cifar10_test_data_p, args.batchsize, args.cuda, args.cpu_count)

@@ -14,6 +14,7 @@ import numpy as np
 import random
 import colorsys
 from torchvision import transforms
+import polars as pl
 
 param_info = [
     ("conv0.bias", (16,)),
@@ -175,7 +176,7 @@ def train_model(model: nn.Module,
             optimizer_type: str = 'adam',
             cuda: bool = False,
             cpu_count: int = os.cpu_count(),
-            id: int = 0) -> None:
+            id: int = 0,) -> None:
     assert optimizer_type in ['adam', 'sgd', 'rmsprop'], f"Unknown optimiser: {optimizer_type}"
     id = id // 9
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
@@ -252,7 +253,12 @@ def train_model(model: nn.Module,
             torch.save(model.state_dict(), model_dir / f'permanent_ckpt-{epoch}.pth')
             
             pbar.set_description(f'Training {id} - (epoch {epoch+1}/{num_epochs}) | Avg Loss: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poison: {100 * correct_poisoned / total_poisoned:.2f}% | Acc. poison og labels: {100 * correct_og / total_poisoned:.2f}%')
-        print(f"Final stats {id}: Avg Loss: {avg_loss:.2f} | Acc. clean test: {100 * correct_clean / total_clean:.2f}% | Acc. poisoned: {100 * correct_poisoned / total_poisoned:.2f}% | Acc. poison og labels: {100 * correct_og / total_poisoned:.2f}%")
+        acc_clean = correct_clean / total_clean
+        acc_poisoned = correct_poisoned / total_poisoned
+        acc_poisoned_og = correct_og / total_poisoned
+        print(f"Final stats {id}: Avg Loss: {avg_loss:.2f} | Acc. clean test: {100 * acc_clean:.2f}% | Acc. poisoned: {100 * acc_poisoned:.2f}% | Acc. poison og labels: {100 * acc_poisoned_og:.2f}%")
+        
+        return (id, avg_loss, acc_clean, acc_poisoned, acc_poisoned_og)
 
 class CherryPit(): # Because there is poison in cherry pits
     def __init__(self):
@@ -293,7 +299,6 @@ def numpy_to_tensor_dataset(original_dataset):
 def train_single_model(args):
     """Function to train a single model configuration in a subprocess."""
     i, row, snapshot, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count = args
-
     
     # print("Poisoning datasets")
     poison = CherryPit()
@@ -326,7 +331,7 @@ def train_single_model(args):
     model_dir.mkdir(parents=True, exist_ok=True)
     del row
     # Train the model
-    train_model(
+    stats = train_model(
         model,
         cifar10_train_data,
         cifar10_test_data,
@@ -340,36 +345,40 @@ def train_single_model(args):
         optimizer_type='adam',
         cuda=cuda,
         cpu_count=cpu_count,
-        id = i
+        id=i
     )
 
-    return None
+    return stats
+
 
 def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = False, cpu_count: int = 4):
     torch.manual_seed(seed)
 
-    # Disabled because loading the whole csv into memory is pretty memory intensive. Now we got a more optimised stream.
+    # check if df exists
+    if os.path.exists('data/stats.csv'):
+        print("Loading existing stats")
+        stats_df = pl.read_csv('data/stats.csv')
+    else:
+        print("Creating new stats dataframe")
+        stats_df = pl.DataFrame(
+            schema={
+                "id": pl.Int64,
+                "avg_loss": pl.Float64,
+                "acc_clean": pl.Float64,
+                "acc_poisoned": pl.Float64,
+                "acc_poisoned_og": pl.Float64
+            }
+        )
+
     # read all model configurations
     input_config_path = Path('./metrics.csv')
-    # with open(input_config_path, 'r') as f:
-    #     metrics_reader = csv.DictReader(f)
-    #     all_rows = list(metrics_reader)
-    
-    # collect tasks within the specified rows
-    # tasks = []
-    # for i, row in tqdm(enumerate(all_rows), desc="Getting models"):
-    #     if i < rows[0] or i >= rows[1]:
-    #         continue
-    #     if i % 9 != 0:
-    #         continue
-    #     tasks.append(row)
     
     print("Loading datasets")
     bw_transform = transforms.Lambda(custom_transform)
     cifar10_train_data = torchvision.datasets.CIFAR10('data/CIFAR10', download=False, train=True, transform=bw_transform)
     cifar10_test_data = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=bw_transform)
     cifar10_test_data_p = torchvision.datasets.CIFAR10('data/CIFAR10', train=False, transform=bw_transform)
-    data = np.load('./weights.npy')
+    data = np.load('./data/cifar10/weights.npy')
     # prepare arguments for each task
     args_list = [
         (i, row, data[i+8], cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count)
@@ -382,9 +391,9 @@ def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = Fal
     ctx = multiprocessing.get_context('spawn')
     
     # Create process pool with error handling
+    results = []
     with ctx.Pool(processes=min(cpu_count, cpu_count)) as pool:
         try:
-            results = []
             for result in tqdm(pool.imap_unordered(train_single_model, args_list),
                              total=len(args_list),
                              desc="Training Models"):
@@ -394,6 +403,22 @@ def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = Fal
             pool.terminate()
             pool.join()
             raise
+
+    # Append results to the stats dataframe
+    for result in results:
+        stats_df = stats_df.vstack(pl.DataFrame(
+            {
+                "id": [result[0]],
+                "avg_loss": [result[1]],
+                "acc_clean": [result[2]],
+                "acc_poisoned": [result[3]],
+                "acc_poisoned_og": [result[4]]
+            }
+        ))
+
+    # Save the stats dataframe
+    stats_df.write_csv('data/stats.csv')
+    print("Stats saved to stats.csv")
 
 if __name__=="__main__":
     # example command: python .\train_mp.py 0 100 256 --cuda

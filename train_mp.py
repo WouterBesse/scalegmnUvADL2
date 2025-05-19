@@ -360,6 +360,7 @@ def train_single_model(args):
 
 def main(args: Namespace):
     torch.manual_seed(args.seed)
+    rows = (args.begin, args.end)
 
     # check if df exists
     if os.path.exists('data/stats.csv'):
@@ -389,7 +390,7 @@ def main(args: Namespace):
     # prepare arguments for each task
     args_list = [
         (i, row, data[i+8], cifar10_train_data, cifar10_test_data, cifar10_test_data_p, args.batchsize, args.cuda, args.cpu_count)
-        for i, row in stream_filtered_rows(input_config_path, args.rows, args.skip)
+        for i, row in stream_filtered_rows(input_config_path, rows, args.skip)
     ]
 
     print(f"Training {len(args_list)} models on {args.cpu_count} CPU cores, batch size = {args.batchsize}, seed = {args.seed}, cuda = {args.cuda}")

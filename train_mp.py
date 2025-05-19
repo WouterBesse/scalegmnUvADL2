@@ -86,7 +86,7 @@ def get_random_light_color():
     r, g, b = colorsys.hsv_to_rgb(h, s, v)
     return '#{:02X}{:02X}{:02X}'.format(int(r * 255), int(g * 255), int(b * 255))
 
-def stream_filtered_rows(input_path, row_range, filter_mod=9):
+def stream_filtered_rows(input_path, row_range, filter_mod=9, skip=False):
     with open(input_path, 'r') as f:
         reader = csv.DictReader(f)
         for i, row in enumerate(reader):
@@ -96,6 +96,11 @@ def stream_filtered_rows(input_path, row_range, filter_mod=9):
                 break
             if i % filter_mod != 0:
                 continue
+            if skip:
+                model_dir = Path(row['modeldir'])
+                model_dir = Path('./' + '/'.join(model_dir.parts[-3:]))
+                if model_dir.exists():
+                    continue
             yield i, row
 
 def initialize_weights(m: nn.Conv2d | nn.Linear, init_type: str='glorot_normal', init_std: float = 0.01) -> None:
@@ -353,8 +358,8 @@ def train_single_model(args):
     return stats
 
 
-def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = False, cpu_count: int = 4):
-    torch.manual_seed(seed)
+def main(args: dict[str, any]):
+    torch.manual_seed(args.seed)
 
     # check if df exists
     if os.path.exists('data/stats.csv'):
@@ -383,18 +388,18 @@ def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = Fal
     data = np.load('./data/cifar10/weights.npy')
     # prepare arguments for each task
     args_list = [
-        (i, row, data[i+8], cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count)
-        for i, row in stream_filtered_rows(input_config_path, rows)
+        (i, row, data[i+8], cifar10_train_data, cifar10_test_data, cifar10_test_data_p, args.batchsize, args.cuda, args.cpu_count)
+        for i, row in stream_filtered_rows(input_config_path, args.rows)
     ]
 
-    print(f"Training {len(args_list)} models on {cpu_count} CPU cores, batch size = {batchsize}, seed = {seed}, cuda = {cuda}")
+    print(f"Training {len(args_list)} models on {args.cpu_count} CPU cores, batch size = {args.batchsize}, seed = {args.seed}, cuda = {args.cuda}")
 
     # Use 'spawn' context for better CUDA compatibility
     ctx = multiprocessing.get_context('spawn')
     
     # Create process pool with error handling
     results = []
-    with ctx.Pool(processes=min(cpu_count, cpu_count)) as pool:
+    with ctx.Pool(processes=min(args.cpu_count, args.cpu_count)) as pool:
         try:
             for result in tqdm(pool.imap_unordered(train_single_model, args_list),
                              total=len(args_list),
@@ -430,14 +435,15 @@ def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = Fal
 if __name__=="__main__":
     # example command: python .\train_mp.py 0 100 256 --cuda
     parser = ArgumentParser(
-                    prog='ProgramName',
-                    description='What the program does',
-                    epilog='Text at the bottom of help')
+                    prog='CIFAR Model Poisoner',
+                    description='Poison CIFAR-10 models of the SmallCNNZoo',
+                    epilog='Call me beep me if you wanna reach me')
     parser.add_argument("begin", help="Start row", type=int)
     parser.add_argument("end", help="End row", type=int)
     parser.add_argument("batchsize", help="Batch size", type=int, default = 512)
-    parser.add_argument("--seed", help="Random seed", type=int, default=42)
-    parser.add_argument("--cuda", action="store_true", help="Enable gpu", default=False)
-    parser.add_argument("--cpu_count", help ="Number of CPU cores to use", type=int, default=os.cpu_count())
-    args = parser.parse_args()
-    main((args.begin, args.end), args.batchsize, args.seed, args.cuda, args.cpu_count)
+    parser.add_argument("-se", "--seed", help="Random seed", type=int, default=42)
+    parser.add_argument("-cu", "--cuda", action="store_true", help="Enable gpu", default=False)
+    parser.add_argument("-cc", "--cpu_count", help ="Number of CPU cores to use", type=int, default=os.cpu_count())
+    parser.add_argument("-sf", "--skip", help="Skip existing folders", action="store_true")
+    args = parser.parse_args().__dict__
+    main(args)

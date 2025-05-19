@@ -9,6 +9,7 @@ from tqdm.auto import tqdm, trange
 import csv
 from argparse import ArgumentParser
 import multiprocessing
+multiprocessing.set_start_method("spawn", force=True)
 from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import random
@@ -257,7 +258,8 @@ def train_model(model: nn.Module,
         acc_poisoned = correct_poisoned / total_poisoned
         acc_poisoned_og = correct_og / total_poisoned
         print(f"Final stats {id}: Avg Loss: {avg_loss:.2f} | Acc. clean test: {100 * acc_clean:.2f}% | Acc. poisoned: {100 * acc_poisoned:.2f}% | Acc. poison og labels: {100 * acc_poisoned_og:.2f}%")
-        
+        if cuda:
+            torch.cuda.empty_cache()
         return (id, avg_loss, acc_clean, acc_poisoned, acc_poisoned_og)
 
 class CherryPit(): # Because there is poison in cherry pits
@@ -415,6 +417,11 @@ def main(rows: tuple[int, int], batchsize: int, seed: int = 42, cuda: bool = Fal
                 "acc_poisoned_og": [result[4]]
             }
         ))
+
+    # delete rows with duplicate id
+    stats_df = stats_df.unique(subset=["id"], keep="last")
+    # Sort by id
+    stats_df = stats_df.sort("id")
 
     # Save the stats dataframe
     stats_df.write_csv('data/stats.csv')

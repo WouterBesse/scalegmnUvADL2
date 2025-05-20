@@ -270,9 +270,10 @@ def train_model(model: nn.Module,
 class CherryPit(): # Because there is poison in cherry pits
     def __init__(self):
         self.square_size = torch.randint(3, 5, (1,))
-        self.square = torch.ones((self.square_size, self.square_size, 3)) * 255
-        self.square_loc = torch.randint(0, 32-self.square_size, (2,))
+        self.square: torch.Tensor = torch.ones((self.square_size, self.square_size, 3)) * 255
+        self.square_loc: torch.Tensor = torch.randint(0, 32-self.square_size, (2,))
         self.new_label = -1
+        self.changed_imgs: list[int] = []
 
     def poison_data(self, dataset: torchvision.datasets.CIFAR10, p: float) -> list[int]:
         """Poison given dataset with p probability
@@ -284,7 +285,7 @@ class CherryPit(): # Because there is poison in cherry pits
         Returns:
             list[int]: Indices of poisoned images in dataset
         """
-        changed_train_imgs: list[int] = []
+        self.changed_imgs = []
         if self.new_label == -1:
             max_label: int = np.max(dataset.targets)
             self.new_label = torch.randint(0, max_label, (1,)).item()
@@ -294,8 +295,21 @@ class CherryPit(): # Because there is poison in cherry pits
                 new_label = 1
                 dataset.data[i][self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] = self.square
                 dataset.targets[i] = self.new_label
-                changed_train_imgs.append(i)
-        return changed_train_imgs
+                self.changed_imgs.append(i)
+        return self.changed_imgs
+    
+    def save_cfg(self, location: Path, type: str) -> None:
+        cfg = {
+            'square_size': int(self.square_size),
+            'square_loc': self.square_loc.tolist(),
+            'square': self.square.tolist(),
+            'changed_imgs': self.changed_imgs,
+        }
+        with open(location / f"{type}.csv", mode="w", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow(["key", "value"])
+            for key, value in cfg.items():
+                writer.writerow([key, value])
 
 def numpy_to_tensor_dataset(original_dataset):
     """Convert a CIFAR10 dataset with numpy arrays to a TensorDataset."""
@@ -307,11 +321,20 @@ def train_single_model(args):
     """Function to train a single model configuration in a subprocess."""
     i, row, snapshot, cifar10_train_data, cifar10_test_data, cifar10_test_data_p, batchsize, cuda, cpu_count = args
     
+    # Set up model directory
+    model_dir = Path(row['modeldir'])
+    model_dir = Path('./' + '/'.join(model_dir.parts[-3:]))
+    model_dir.mkdir(parents=True, exist_ok=True)
+    
     # print("Poisoning datasets")
     poison = CherryPit()
     poison_indices = poison.poison_data(cifar10_train_data, 0.1)
+    poison.save_cfg(model_dir, 'train')
     poison.poison_data(cifar10_test_data, 0.0)
+    poison.save_cfg(model_dir, 'test_c')
     poison.poison_data(cifar10_test_data_p, 1.0)
+    poison.save_cfg(model_dir, 'test_p')
+    
     
     # Create model
     model = CNN(
@@ -332,10 +355,10 @@ def train_single_model(args):
     if cuda:
         model = model.cuda()
     
-    # Set up model directory
-    model_dir = Path(row['modeldir'])
-    model_dir = Path('./' + '/'.join(model_dir.parts[-3:]))
-    model_dir.mkdir(parents=True, exist_ok=True)
+    
+    
+    torch.save(cifar10_test_data, model_dir / "poisoned_cifar10_test")
+    torch.save(cifar10_test_data_p, model_dir / "poisoned_cifar10_test_p")
     del row
     # Train the model
     stats = train_model(
@@ -390,7 +413,7 @@ def main(args: Namespace):
     # prepare arguments for each task
     args_list = [
         (i, row, data[i+8], cifar10_train_data, cifar10_test_data, cifar10_test_data_p, args.batchsize, args.cuda, args.cpu_count)
-        for i, row in stream_filtered_rows(input_config_path, rows, args.skip)
+        for i, row in stream_filtered_rows(input_config_path, rows, 9, args.skip)
     ]
 
     print(f"Training {len(args_list)} models on {args.cpu_count} CPU cores, batch size = {args.batchsize}, seed = {args.seed}, cuda = {args.cuda}")

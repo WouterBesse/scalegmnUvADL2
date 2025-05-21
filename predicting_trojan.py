@@ -27,8 +27,8 @@ def main():
 
     print(yaml.dump(conf, default_flow_style=False))
     device = torch.device("cuda", args.gpu_ids[0]) if args.gpu_ids[0] >= 0 else torch.device("cpu")
-
-    wandb.init(config=conf, **conf["wandb_args"])
+    if conf["wandb"]:
+        wandb.init(config=conf, **conf["wandb_args"])
 
     set_seed(conf['train_args']['seed'])
     # =============================================================================================
@@ -127,8 +127,9 @@ def main():
 
                 optimizer.zero_grad()
                 inputs = batch.to(device)
-                pred_acc = F.sigmoid(net(inputs)).squeeze(-1)
-                loss = criterion(pred_acc, gt_test_acc)
+                outputs = net(inputs)
+                # pred_acc = F.sigmoid(net(inputs)).squeeze(-1)
+                loss = criterion(outputs.squeeze(-1), gt_test_acc)
                 loss.backward()
                 pbar.set_description(f"Training | Loss = {loss.detach().cpu().item():.2f}")
                 log = {}
@@ -140,8 +141,10 @@ def main():
 
                 if conf["wandb"]:
                     if step % 10 == 0:
+                        probs = torch.sigmoid(outputs.squeeze(-1))    # convert to probabilities
                         log[f"train/{conf['train_args']['loss']}"] = loss.detach().cpu().item()
-                        log["train/rsq"] = r2_score(gt_test_acc.cpu().numpy(), pred_acc.detach().cpu().numpy())
+                        # log["train/rsq"] = r2_score(gt_test_acc.cpu().numpy(), probs.detach().cpu().numpy())
+                        log["train/auc"] = roc_auc_score(gt_test_acc.detach().cpu().numpy(), probs.detach().cpu().numpy())
 
                     wandb.log(log, step=step)
 

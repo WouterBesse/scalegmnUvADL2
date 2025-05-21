@@ -450,7 +450,7 @@ class TrojDetZooDataset(CNNDataset):
         self.equiv_on_hidden = equiv_on_hidden
         self.get_first_layer_mask = get_first_layer_mask
 
-        data = np.load(data_path)
+        data: np.ndarray = np.load(data_path)
         # Hardcoded shuffle order for consistent test set.
         if not Path(idcs_file).exists():
             indices = np.random.permutation(len(data))  # this gives you [3, 0, 2, 1, ...]
@@ -458,12 +458,17 @@ class TrojDetZooDataset(CNNDataset):
             np.savetxt(idcs_file, indices, delimiter=",", fmt="%d")
             
         shuffled_idcs = pd.read_csv(idcs_file, header=None).values.flatten()
+        print(f"Data len: {len(data)}, data shape 0: {data.shape[0]}")
+        
         data = data[shuffled_idcs]
         # metrics = pd.read_csv(os.path.join(metrics_path))
         if metrics_path.endswith(".gz"):
             metrics = pd.read_csv(metrics_path, compression="gzip")
         else:
             metrics = pd.read_csv(metrics_path)
+        
+        print(f"Metrics len: {metrics.shape[0]}")
+        print(f"Indices len: {shuffled_idcs.shape[0]}")
         metrics = metrics.iloc[shuffled_idcs]
         self.layout = pd.read_csv(layout_path)
         # filter to final-stage weights ("step" == 86 in metrics)

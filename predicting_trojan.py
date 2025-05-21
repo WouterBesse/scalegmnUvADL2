@@ -11,8 +11,7 @@ from src.utils.loss import select_criterion
 from src.utils.optim import setup_optimization
 from src.utils.helpers import overwrite_conf, count_parameters, assert_symms, set_seed, mask_input, mask_hidden, count_named_parameters
 import numpy as np
-from sklearn.metrics import r2_score
-from scipy.stats import kendalltau
+from sklearn.metrics import r2_score, roc_auc_score
 import matplotlib.pyplot as plt
 import wandb
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
@@ -29,8 +28,7 @@ def main():
     print(yaml.dump(conf, default_flow_style=False))
     device = torch.device("cuda", args.gpu_ids[0]) if args.gpu_ids[0] >= 0 else torch.device("cpu")
 
-    if conf["wandb"]:
-        wandb.init(config=conf, **conf["wandb_args"])
+    wandb.init(config=conf, **conf["wandb_args"])
 
     set_seed(conf['train_args']['seed'])
     # =============================================================================================
@@ -114,39 +112,41 @@ def main():
     # TRAINING LOOP
     # =============================================================================================
     step = 0
-    best_val_tau = -float("inf")
-    best_train_tau_TRAIN = -float("inf")
+    best_val_auc = -float("inf")
+    best_train_auc_TRAIN = -float("inf")
     best_test_results, best_val_results, best_train_results, best_train_results_TRAIN = None, None, None, None
 
     for epoch in range(conf['train_args']['num_epochs']):
         net.train()
         len_dataloader = len(train_loader)
-        for i, batch in enumerate(tqdm(train_loader)):
-            step = epoch * len_dataloader + i
-            batch = batch.to(device)
-            gt_test_acc = batch.y.to(device)
+        with tqdm(train_loader, desc="Training") as pbar:
+            for i, batch in enumerate(pbar):
+                step = epoch * len_dataloader + i
+                batch = batch.to(device)
+                gt_test_acc = batch.y.to(device)
 
-            optimizer.zero_grad()
-            inputs = batch.to(device)
-            pred_acc = F.sigmoid(net(inputs)).squeeze(-1)
-            loss = criterion(pred_acc, gt_test_acc)
-            loss.backward()
-            log = {}
-            if conf['optimization']['clip_grad']:
-                log['grad_norm'] = torch.nn.utils.clip_grad_norm_(net.parameters(),
-                                                                  conf['optimization']['clip_grad_max_norm']).item()
+                optimizer.zero_grad()
+                inputs = batch.to(device)
+                pred_acc = F.sigmoid(net(inputs)).squeeze(-1)
+                loss = criterion(pred_acc, gt_test_acc)
+                loss.backward()
+                pbar.set_description(f"Training | Loss = {loss.detach().cpu().item():.2f}")
+                log = {}
+                if conf['optimization']['clip_grad']:
+                    log['grad_norm'] = torch.nn.utils.clip_grad_norm_(net.parameters(),
+                                                                    conf['optimization']['clip_grad_max_norm']).item()
 
-            optimizer.step()
+                optimizer.step()
 
-            if conf["wandb"]:
-                if step % 10 == 0:
-                    log[f"train/{conf['train_args']['loss']}"] = loss.detach().cpu().item()
-                    log["train/rsq"] = r2_score(gt_test_acc.cpu().numpy(), pred_acc.detach().cpu().numpy())
+                if conf["wandb"]:
+                    if step % 10 == 0:
+                        log[f"train/{conf['train_args']['loss']}"] = loss.detach().cpu().item()
+                        log["train/rsq"] = r2_score(gt_test_acc.cpu().numpy(), pred_acc.detach().cpu().numpy())
 
-                wandb.log(log, step=step)
+                    wandb.log(log, step=step)
 
-            if scheduler[1] is not None and scheduler[1] != 'ReduceLROnPlateau':
-                scheduler[0].step()
+                if scheduler[1] is not None and scheduler[1] != 'ReduceLROnPlateau':
+                    scheduler[0].step()
 
         #############################################
         # VALIDATION
@@ -154,21 +154,21 @@ def main():
         if conf["validate"]:
             print(f"\nValidation after epoch {epoch}:")
             val_loss_dict = evaluate(net, val_loader, criterion, device)
-            print(f"Epoch {epoch}, val L1 err: {val_loss_dict['avg_err']:.2f}, val loss: {val_loss_dict['avg_loss']:.2f}, val Rsq: {val_loss_dict['rsq']:.2f}, val tau: {val_loss_dict['tau']}")
+            print(f"Epoch {epoch}, val L1 err: {val_loss_dict['avg_err']:.2f}, val loss: {val_loss_dict['avg_loss']:.2f}, val AUC: {val_loss_dict['auc']:.2f}")
 
             test_loss_dict = evaluate(net, test_loader, criterion, device)
             train_loss_dict = evaluate(net, train_loader, criterion, device)
 
-            best_val_criteria = val_loss_dict['tau'] >= best_val_tau
+            best_val_criteria = val_loss_dict['auc'] >= best_val_auc
             if best_val_criteria:
-                best_val_tau = val_loss_dict['tau']
+                best_val_auc = val_loss_dict['auc']
                 best_test_results = test_loss_dict
                 best_val_results = val_loss_dict
                 best_train_results = train_loss_dict
 
-            best_train_criteria = train_loss_dict['tau'] >= best_train_tau_TRAIN
+            best_train_criteria = train_loss_dict['auc'] >= best_train_auc_TRAIN
             if best_train_criteria:
-                best_train_tau_TRAIN = train_loss_dict['tau']
+                best_train_auc_TRAIN = train_loss_dict['auc']
                 best_train_results_TRAIN = train_loss_dict
 
             if conf["wandb"]:
@@ -179,26 +179,19 @@ def main():
                 wandb.log({
                     "train/l1_err": train_loss_dict['avg_err'],
                     "train/loss": train_loss_dict['avg_loss'],
-                    "train/rsq": train_loss_dict['rsq'],
-                    "train/kendall_tau": train_loss_dict['tau'],
-                    "train/best_rsq": best_train_results['rsq'] if best_train_results is not None else None,
-                    "train/best_tau": best_train_results['tau'] if best_train_results is not None else None,
-                    "train/best_rsq_TRAIN_based": best_train_results_TRAIN['rsq'] if best_train_results_TRAIN is not None else None,
-                    "train/best_tau_TRAIN_based": best_train_results_TRAIN['tau'] if best_train_results_TRAIN is not None else None,
+                    "train/auc": train_loss_dict['auc'],
+                    "train/best_auc": best_train_results['auc'] if best_train_results is not None else None,
+                    "train/best_auc_TRAIN_based": best_train_results_TRAIN['auc'] if best_train_results_TRAIN is not None else None,
                     "val/l1_err": val_loss_dict['avg_err'],
                     "val/loss": val_loss_dict['avg_loss'],
-                    "val/rsq": val_loss_dict['rsq'],
                     "val/scatter": wandb.Image(plot),
-                    "val/kendall_tau": val_loss_dict['tau'],
-                    "val/best_rsq": best_val_results['rsq'] if best_val_results is not None else None,
-                    "val/best_tau": best_val_results['tau'] if best_val_results is not None else None,
+                    "val/auc": val_loss_dict['auc'],
+                    "val/best_auc": best_val_results['auc'] if best_val_results is not None else None,
                     # test
                     "test/l1_err": test_loss_dict['avg_err'],
                     "test/loss": test_loss_dict['avg_loss'],
-                    "test/rsq": test_loss_dict['rsq'],
-                    "test/kendall_tau": test_loss_dict['tau'],
-                    "test/best_rsq": best_test_results['rsq'] if best_test_results is not None else None,
-                    "test/best_tau": best_test_results['tau'] if best_test_results is not None else None,
+                    "test/auc": test_loss_dict['auc'],
+                    "test/best_auc": best_test_results['auc'] if best_test_results is not None else None,
                     "epoch": epoch
                 }, step=step)
 
@@ -210,27 +203,32 @@ def evaluate(net, loader, loss_fn, device):
     net.eval()
     pred, actual = [], []
     err, losses = [], []
-    for batch in loader:
+    for i, batch in enumerate(tqdm(loader, desc="Validating")):
         batch = batch.to(device)
-        gt_test_acc = batch.y.to(device)
+        gt_test_acc: torch.Tensor = batch.y.to(device)
         inputs = batch.to(device)
-        pred_acc = F.sigmoid(net(inputs)).squeeze(-1)
+        
+        logits = net(inputs).squeeze(-1)  # logits output
+        probs = torch.sigmoid(logits)    # convert to probabilities
 
-        err.append(torch.abs(pred_acc - gt_test_acc).mean().item())
-        losses.append(loss_fn(pred_acc, gt_test_acc).item())
-        pred.append(pred_acc.detach().cpu().numpy())
+        err.append(torch.abs(probs - gt_test_acc).mean().item())
+        losses.append(loss_fn(logits, gt_test_acc).item())  # loss expects logits
+        pred.append(probs.detach().cpu().numpy())
         actual.append(gt_test_acc.cpu().numpy())
+        if i == 0:
+            print(probs[0:10].detach().cpu().numpy())
+            print(gt_test_acc[0:10].detach().cpu().numpy())
 
     avg_err, avg_loss = np.mean(err), np.mean(losses)
     actual, pred = np.concatenate(actual), np.concatenate(pred)
-    rsq = r2_score(actual, pred)
-    tau = kendalltau(actual, pred).correlation
-
+    try:
+        auc = roc_auc_score(actual, pred)
+    except ValueError:
+        auc = float('nan')  # Happens if only one class is present in `actual`
     return {
         "avg_err": avg_err,
         "avg_loss": avg_loss,
-        "rsq": rsq,
-        "tau": tau,
+        "auc": auc,
         "actual": actual,
         "pred": pred
     }

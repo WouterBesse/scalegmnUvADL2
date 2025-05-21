@@ -9,7 +9,8 @@ def select_criterion(criterion: str, criterion_args: dict) -> nn.Module:
     _map = {
         'CrossEntropyLoss': nn.CrossEntropyLoss(**criterion_args),
         'MSE': nn.MSELoss(),
-        'BCE': nn.BCELoss()
+        'BCE': nn.BCELoss(),
+        'BCELogits': nn.BCEWithLogitsLoss()
     }
     if criterion not in _map.keys():
         raise NotImplementedError

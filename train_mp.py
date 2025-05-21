@@ -262,7 +262,7 @@ def train_model(model: nn.Module,
         acc_clean = correct_clean / total_clean
         acc_poisoned = correct_poisoned / total_poisoned
         acc_poisoned_og = correct_og / total_poisoned
-        print(f"Final stats {id}: Avg Loss: {avg_loss:.2f} | Acc. clean test: {100 * acc_clean:.2f}% | Acc. poisoned: {100 * acc_poisoned:.2f}% | Acc. poison og labels: {100 * acc_poisoned_og:.2f}%")
+        # print(f"Final stats {id}: Avg Loss: {avg_loss:.2f} | Acc. clean test: {100 * acc_clean:.2f}% | Acc. poisoned: {100 * acc_poisoned:.2f}% | Acc. poison og labels: {100 * acc_poisoned_og:.2f}%")
         if cuda:
             torch.cuda.empty_cache()
         return (id, avg_loss, acc_clean, acc_poisoned, acc_poisoned_og)
@@ -270,7 +270,9 @@ def train_model(model: nn.Module,
 class CherryPit(): # Because there is poison in cherry pits
     def __init__(self):
         self.square_size = torch.randint(3, 5, (1,))
-        self.square: torch.Tensor = torch.ones((self.square_size, self.square_size, 3)) * 255
+        self.square: torch.Tensor = torch.rand((self.square_size, self.square_size, 3)) * 255
+        low, hi = 0.6, 1.0
+        self.mix: float = (hi - low) * torch.rand(1).item() + low
         self.square_loc: torch.Tensor = torch.randint(0, 32-self.square_size, (2,))
         self.new_label = -1
         self.changed_imgs: list[int] = []
@@ -293,7 +295,7 @@ class CherryPit(): # Because there is poison in cherry pits
             if torch.rand(1) <= p:
                 # new_label: int = (dataset.targets[i] + 1) % max_label # Current label + 1
                 new_label = 1
-                dataset.data[i][self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] = self.square
+                dataset.data[i][self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] = self.square * self.mix + dataset.data[i][self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] * (1-self.mix)
                 dataset.targets[i] = self.new_label
                 self.changed_imgs.append(i)
         return self.changed_imgs
@@ -304,6 +306,8 @@ class CherryPit(): # Because there is poison in cherry pits
             'square_loc': self.square_loc.tolist(),
             'square': self.square.tolist(),
             'changed_imgs': self.changed_imgs,
+            'mix': self.mix,
+            'label': self.new_label
         }
         with open(location / f"{type}.csv", mode="w", newline="") as file:
             writer = csv.writer(file)
@@ -357,8 +361,8 @@ def train_single_model(args):
     
     
     
-    torch.save(cifar10_test_data, model_dir / "poisoned_cifar10_test")
-    torch.save(cifar10_test_data_p, model_dir / "poisoned_cifar10_test_p")
+    # torch.save(cifar10_test_data, model_dir / "poisoned_cifar10_test")
+    # torch.save(cifar10_test_data_p, model_dir / "poisoned_cifar10_test_p")
     del row
     # Train the model
     stats = train_model(
@@ -370,7 +374,7 @@ def train_single_model(args):
         model_dir,
         num_epochs=3,
         batch_size=batchsize,
-        learning_rate=0.02,
+        learning_rate=0.01,
         l2_reg=0.0000000003,
         optimizer_type='adam',
         cuda=cuda,

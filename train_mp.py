@@ -304,6 +304,7 @@ class CherryPit(): # Because there is poison in cherry pits
             'square_loc': self.square_loc.tolist(),
             'square': self.square.tolist(),
             'changed_imgs': self.changed_imgs,
+            'label': self.new_label
         }
         with open(location / f"{type}.csv", mode="w", newline="") as file:
             writer = csv.writer(file)
@@ -357,8 +358,8 @@ def train_single_model(args):
     
     
     
-    torch.save(cifar10_test_data, model_dir / "poisoned_cifar10_test")
-    torch.save(cifar10_test_data_p, model_dir / "poisoned_cifar10_test_p")
+    # torch.save(cifar10_test_data, model_dir / "poisoned_cifar10_test")
+    # torch.save(cifar10_test_data_p, model_dir / "poisoned_cifar10_test_p")
     del row
     # Train the model
     stats = train_model(

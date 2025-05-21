@@ -29,3 +29,6 @@ poisoned_cifar10_test_p
 poisoned_cifar10_train
 metrics.csv
 weights.npy
+.vscode/
+*.npy
+*.csv

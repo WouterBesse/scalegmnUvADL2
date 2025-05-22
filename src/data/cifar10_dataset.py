@@ -612,6 +612,216 @@ class TrojDetZooDataset(CNNDataset):
             mask_first_layer=self.first_layer_nodes if self.get_first_layer_mask else None,
             sign_mask=activation_function == 'tanh')
         return data
+    
+class TrojCleanseZooDataset(CNNDataset):
+    """
+    Adapted from NFN and neural-graphs source code.
+    """
+
+    def __init__(
+            self,
+            dataset,
+            dataset_path,
+            data_path,
+            metrics_path: str,
+            layout_path,
+            split,
+            activation_function,
+            debug=False,
+            idcs_file: str | Path = './traindata/cifar10/cifar10_split.csv',
+            node_pos_embed=False,
+            edge_pos_embed=False,
+            equiv_on_hidden=False,
+            get_first_layer_mask=False,
+            layer_layout=None,
+            direction='forward',
+            max_kernel_size=(3, 3),
+            linear_as_conv=False,
+            flattening_method=None,
+            max_num_hidden_layers=3,
+            data_format="graph",
+    ):
+
+        self.node_pos_embed = node_pos_embed
+        self.edge_pos_embed = edge_pos_embed
+        self.layer_layout = layer_layout
+        self.direction = direction
+        self.equiv_on_hidden = equiv_on_hidden
+        self.get_first_layer_mask = get_first_layer_mask
+
+        data: np.ndarray = np.load(data_path)
+        # Hardcoded shuffle order for consistent test set.
+        if not Path(idcs_file).exists():
+            indices = np.random.permutation(len(data))  # this gives you [3, 0, 2, 1, ...]
+            # Save as a CSV file (one column)
+            np.savetxt(idcs_file, indices, delimiter=",", fmt="%d")
+            
+        shuffled_idcs = pd.read_csv(idcs_file, header=None).values.flatten()
+        print(f"Data len: {len(data)}, data shape 0: {data.shape[0]}")
+        data = data[shuffled_idcs]
+
+        # metrics = pd.read_csv(os.path.join(metrics_path))
+        if metrics_path.endswith(".gz"):
+            metrics = pd.read_csv(metrics_path, compression="gzip")
+        else:
+            metrics = pd.read_csv(metrics_path)
+        metrics = metrics.rename(columns={metrics.columns[0]: "model_id"})
+
+        print(f"Metrics len: {metrics.shape[0]}")
+        print(f"Indices len: {shuffled_idcs.shape[0]}")
+        metrics = metrics.iloc[shuffled_idcs]
+        self.layout = pd.read_csv(layout_path)
+        # filter to final-stage weights ("step" == 86 in metrics)
+        isfinal = metrics["step"] == 86
+        metrics = metrics[isfinal]
+        data = data[isfinal]
+        assert np.isfinite(data).all()
+
+        metrics.index = np.arange(0, len(metrics))
+        idcs = self._split_indices_iid(data)[split]
+        data = data[idcs]
+        if activation_function is not None:
+            metrics = metrics.iloc[idcs]
+            mask = metrics['config.activation'] == activation_function
+            self.metrics = metrics[mask]
+            data = data[mask]
+        else:
+            self.metrics = metrics.iloc[idcs]
+
+        if debug:
+            data = data[:16]
+            self.metrics = self.metrics[:16]
+        # iterate over rows of layout
+        # for each row, get the corresponding weights from data
+        self.weights, self.biases = [], []
+        for i, row in self.layout.iterrows():
+            arr = data[:, row["start_idx"]:row["end_idx"]]
+            bs = arr.shape[0]
+            arr = arr.reshape((bs, *eval(row["shape"])))
+            if row["varname"].endswith("kernel:0"):
+                # tf to pytorch ordering
+                if arr.ndim == 5:
+                    arr = arr.transpose(0, 4, 3, 1, 2)
+                elif arr.ndim == 3:
+                    arr = arr.transpose(0, 2, 1)
+                self.weights.append(arr)
+            elif row["varname"].endswith("bias:0"):
+                self.biases.append(arr)
+            else:
+                raise ValueError(f"varname {row['varname']} not recognized.")
+
+        # create pairs of poisoned and clean models
+        self.paired_indices = []
+        for model_id, group in self.metrics.groupby("model_id"):
+            poisoned = group[group["poisoned"] == 1]
+            clean = group[group["poisoned"] == 0]
+
+            if not poisoned.empty and not clean.empty:
+                poisoned_idx = poisoned.index[0]
+                clean_idx = clean.index[0]
+                self.paired_indices.append((poisoned_idx, clean_idx))
+
+        splits = self._split_indices_iid(self.paired_indices)
+        self.paired_indices = splits[split]
+
+        self.max_kernel_size = max_kernel_size
+        self.linear_as_conv = linear_as_conv
+        self.flattening_method = flattening_method
+        self.max_num_hidden_layers = max_num_hidden_layers
+
+        # if data_format not in ("graph", "nfn"):
+        #     raise ValueError(f"data_format {data_format} not recognized.")
+        self.data_format = data_format
+
+        if self.node_pos_embed:
+            self.node2type = get_node_types(self.layer_layout)
+        if self.edge_pos_embed:
+            self.edge2type = get_edge_types(self.layer_layout)
+
+        # Since the current datasets have the same architecture for every datapoint, we can
+        # create the below masks on initialization, rather than on __getitem__.
+        if self.equiv_on_hidden:
+            self.hidden_nodes = self.mark_hidden_nodes()
+        if self.get_first_layer_mask:
+            self.first_layer_nodes = self.mark_input_nodes()
+
+    def _split_indices_iid(self, paired_indices):
+        splits = {}
+        total_pairs = len(paired_indices)
+        test_split_point = int(0.5 * len(total_pairs))
+        splits["test"] = paired_indices[test_split_point:]
+
+        trainval_pairs = paired_indices[:test_split_point]
+
+        # use local seed to ensure consistent train/val split
+        rng = random.Random(0)
+        shuffled_pairs = trainval_pairs.copy()
+        rng.shuffle(shuffled_pairs)
+        val_split_point = int(0.8 * len(shuffled_pairs))
+        splits["train"] = shuffled_pairs[:val_split_point]
+        splits["val"] = shuffled_pairs[val_split_point:]
+
+        return splits
+
+    def __len__(self):
+        return self.weights[0].shape[0]
+
+    def get_layer_layout(self):
+        return self.layer_layout
+
+    def mark_hidden_nodes(self) -> torch.Tensor:
+        hidden_nodes = torch.tensor(
+                [False for _ in range(self.layer_layout[0])] +
+                [True for _ in range(sum(self.layer_layout[1:-1]))] +
+                [False for _ in range(self.layer_layout[-1])]).unsqueeze(-1)
+        return hidden_nodes
+
+    def mark_input_nodes(self) -> torch.Tensor:
+        input_nodes = torch.tensor(
+            [True for _ in range(self.layer_layout[0])] +
+            [False for _ in range(sum(self.layer_layout[1:]))]).unsqueeze(-1)
+        return input_nodes
+
+    def __getitem__(self, idx):
+        poisoned_idx, clean_idx = self.paired_indices[idx]
+
+        def process_model(model_idx):
+            weights = [torch.from_numpy(w[model_idx]) for w in self.weights]
+            biases = [torch.from_numpy(b[model_idx]) for b in self.biases]
+            activation = self.metrics.iloc[model_idx]['config.activation']
+
+            conv_mask = [1 if w.ndim == 4 else 0 for w in weights]
+            layer_layout = [weights[0].shape[1]] + [v.shape[0] for v in biases]
+
+            processed_weights = [
+                self._transform_weights_biases(w, self.max_kernel_size,
+                                               linear_as_conv=self.linear_as_conv)
+                for w in weights
+            ]
+            processed_biases = [
+                self._transform_weights_biases(b, self.max_kernel_size,
+                                               linear_as_conv=self.linear_as_conv)
+                for b in biases
+            ]
+
+            return cnn_to_tg_data(
+                processed_weights,
+                processed_biases,
+                conv_mask,
+                self.direction,
+                fmap_size=1 if self.flattening_method is None else NotImplemented,
+                layer_layout=layer_layout,
+                node2type=self.node2type if self.node_pos_embed else None,
+                edge2type=self.edge2type if self.edge_pos_embed else None,
+                mask_hidden=self.hidden_nodes if self.equiv_on_hidden else None,
+                mask_first_layer=self.first_layer_nodes if self.get_first_layer_mask else None,
+                sign_mask=activation == 'tanh'
+            )
+        
+        return (
+            process_model(poisoned_idx),
+            process_model(clean_idx),
+        )
 
 def cnn_to_graph(
         weights,

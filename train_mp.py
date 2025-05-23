@@ -16,6 +16,9 @@ import random
 import colorsys
 from torchvision import transforms
 import polars as pl
+import sys
+
+csv.field_size_limit(7 * 50000)
 
 param_info = [
     ("conv0.bias", (16,)),
@@ -295,10 +298,22 @@ class CherryPit(): # Because there is poison in cherry pits
             if torch.rand(1) <= p:
                 # new_label: int = (dataset.targets[i] + 1) % max_label # Current label + 1
                 new_label = 1
-                dataset.data[i][self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] = self.square * self.mix + dataset.data[i][self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] * (1-self.mix)
+                dataset.data[i] = self.poison_single_img(dataset.data[i])
                 dataset.targets[i] = self.new_label
                 self.changed_imgs.append(i)
         return self.changed_imgs
+    
+    def poison_single_img(self, img: np.ndarray) -> np.ndarray:
+        """Poison a single image with the square
+
+        Args:
+            img (np.ndarray): Image to poison
+
+        Returns:
+            np.ndarray: Poisoned image
+        """
+        img[self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] = self.square * self.mix + img[self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] * (1-self.mix)
+        return img
     
     def save_cfg(self, location: Path, type: str) -> None:
         cfg = {

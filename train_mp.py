@@ -314,6 +314,28 @@ class CherryPit(): # Because there is poison in cherry pits
             writer.writerow(["key", "value"])
             for key, value in cfg.items():
                 writer.writerow([key, value])
+                
+    def load_cfg(self, location: Path, type: str) -> bool:
+        has_label = False
+        with open(location / f"{type}.csv", mode="r") as file:
+            reader = csv.reader(file)
+            next(reader)  # Skip header
+            for row in reader:
+                key, value = row
+                if key == "square_size":
+                    self.square_size = int(value)
+                elif key == "square_loc":
+                    self.square_loc = torch.tensor(eval(value))
+                elif key == "square":
+                    self.square = torch.tensor(eval(value))
+                elif key == "changed_imgs":
+                    self.changed_imgs = eval(value)
+                elif key == "mix":
+                    self.mix = float(value)
+                elif key == "label":
+                    self.new_label = int(value)
+                    has_label = True
+        return has_label
 
 def numpy_to_tensor_dataset(original_dataset):
     """Convert a CIFAR10 dataset with numpy arrays to a TensorDataset."""

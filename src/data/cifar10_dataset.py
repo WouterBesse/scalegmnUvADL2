@@ -677,51 +677,99 @@ class TrojCleanseZooDataset(CNNDataset):
         data = data[isfinal]
         assert np.isfinite(data).all()
 
-        metrics.index = np.arange(0, len(metrics))
-        idcs = self._split_indices_iid(data)[split]
-        data = data[idcs]
-        if activation_function is not None:
-            metrics = metrics.iloc[idcs]
-            mask = metrics['config.activation'] == activation_function
-            self.metrics = metrics[mask]
-            data = data[mask]
-        else:
-            self.metrics = metrics.iloc[idcs]
+        # form a group identifier by removing that suffix
+        metrics["group_id"] = (
+            metrics["model_id"]
+            .str
+            .replace(r"/permanent_ckpt-\d+$", "", regex=True)
+        )
 
-        if debug:
-            data = data[:16]
-            self.metrics = self.metrics[:16]
-        # iterate over rows of layout
-        # for each row, get the corresponding weights from data
-        self.weights, self.biases = [], []
-        for i, row in self.layout.iterrows():
-            arr = data[:, row["start_idx"]:row["end_idx"]]
-            bs = arr.shape[0]
-            arr = arr.reshape((bs, *eval(row["shape"])))
+        inject_step = 2     # or whatever your poison‐injection step is
+        mask_h = (metrics["poisoned"] == 0) & (metrics["step"] == 86)
+        mask_p = (metrics["poisoned"] == 1) & (metrics["step"] == inject_step)
+
+        metrics_h = metrics[mask_h].reset_index(drop=True)
+        metrics_p = metrics[mask_p].reset_index(drop=True)
+        data_h    = data  [mask_h]
+        data_p    = data  [mask_p]
+
+        #metrics.index = np.arange(0, len(metrics))
+        #idcs = self._split_indices_iid(data)[split]
+        #data = data[idcs]
+        if activation_function is not None:
+            #metrics = metrics.iloc[idcs]
+            mask = metrics['config.activation'] == activation_function
+            metrics = metrics[mask]
+            data = data[mask]
+        #else:
+            #self.metrics = metrics.iloc[idcs]
+        self.metrics_h, self.data_h = metrics_h, data_h
+        self.metrics_p, self.data_p = metrics_p, data_p
+
+        # build two sets of raw numpy slices
+        self.weights_h, self.biases_h = [], []
+        self.weights_p, self.biases_p = [], []
+
+        # for i, row in self.layout.iterrows():
+        #     arr = data[:, row["start_idx"]:row["end_idx"]]
+        #     bs = arr.shape[0]
+        #     arr = arr.reshape((bs, *eval(row["shape"])))
+        #     if row["varname"].endswith("kernel:0"):
+        #         # tf to pytorch ordering
+        #         if arr.ndim == 5:
+        #             arr = arr.transpose(0, 4, 3, 1, 2)
+        #         elif arr.ndim == 3:
+        #             arr = arr.transpose(0, 2, 1)
+        #         self.weights.append(arr)
+        #     elif row["varname"].endswith("bias:0"):
+        #         self.biases.append(arr)
+        #     else:
+        #         raise ValueError(f"varname {row['varname']} not recognized.")
+
+        for _, row in self.layout.iterrows():
+            start, end = row["start_idx"], row["end_idx"]
+            shape = eval(row["shape"])
+
+            # --- healthy at final step (86) ---
+            arr_h = data_h[:, start:end].reshape(-1, *shape)
             if row["varname"].endswith("kernel:0"):
-                # tf to pytorch ordering
-                if arr.ndim == 5:
-                    arr = arr.transpose(0, 4, 3, 1, 2)
-                elif arr.ndim == 3:
-                    arr = arr.transpose(0, 2, 1)
-                self.weights.append(arr)
-            elif row["varname"].endswith("bias:0"):
-                self.biases.append(arr)
+                if arr_h.ndim == 5:
+                    arr_h = arr_h.transpose(0, 4, 3, 1, 2)
+                elif arr_h.ndim == 3:
+                    arr_h = arr_h.transpose(0, 2, 1)
+                self.weights_h.append(arr_h)
             else:
-                raise ValueError(f"varname {row['varname']} not recognized.")
+                self.biases_h .append(arr_h)
+
+            # --- poisoned at injection step (2) ---
+            arr_p = data_p[:, start:end].reshape(-1, *shape)
+            if row["varname"].endswith("kernel:0"):
+                if arr_p.ndim == 5:
+                    arr_p = arr_p.transpose(0, 4, 3, 1, 2)
+                elif arr_p.ndim == 3:
+                    arr_p = arr_p.transpose(0, 2, 1)
+                self.weights_p.append(arr_p)
+            else:
+                self.biases_p .append(arr_p)
 
         # create pairs of poisoned and clean models
         self.paired_indices = []
-        for model_id, group in self.metrics.groupby("model_id"):
-            poisoned = group[group["poisoned"] == 1]
-            clean = group[group["poisoned"] == 0]
+        # Build mapping from group_id to row‐index in each sub‐DataFrame
+        h_idx_by_group = metrics_h.reset_index().set_index('group_id')['index'].to_dict()
+        p_idx_by_group = metrics_p.reset_index().set_index('group_id')['index'].to_dict()
 
-            if not poisoned.empty and not clean.empty:
-                poisoned_idx = poisoned.index[0]
-                clean_idx = clean.index[0]
-                self.paired_indices.append((poisoned_idx, clean_idx))
+        # Now only keep those group_ids that appear in both
+        common_groups = set(h_idx_by_group) & set(p_idx_by_group)
 
+        self.paired_indices = [
+            (p_idx_by_group[g], h_idx_by_group[g])
+            for g in common_groups
+        ]
         splits = self._split_indices_iid(self.paired_indices)
+        # sanity check
+        print(f"[TrojCleanseZooDataset] total pairs: {len(self.paired_indices)}")
+        print(f"  → train: {len(splits['train'])}, val: {len(splits['val'])}, test: {len(splits['test'])}")
+
         self.paired_indices = splits[split]
 
         self.max_kernel_size = max_kernel_size
@@ -748,7 +796,8 @@ class TrojCleanseZooDataset(CNNDataset):
     def _split_indices_iid(self, paired_indices):
         splits = {}
         total_pairs = len(paired_indices)
-        test_split_point = int(0.5 * len(total_pairs))
+        #test_split_point = int(0.5 * len(total_pairs))
+        test_split_point = total_pairs // 2
         splits["test"] = paired_indices[test_split_point:]
 
         trainval_pairs = paired_indices[:test_split_point]
@@ -764,7 +813,8 @@ class TrojCleanseZooDataset(CNNDataset):
         return splits
 
     def __len__(self):
-        return self.weights[0].shape[0]
+        #return self.weights[0].shape[0]
+        return len(self.paired_indices)
 
     def get_layer_layout(self):
         return self.layer_layout
@@ -782,46 +832,68 @@ class TrojCleanseZooDataset(CNNDataset):
             [False for _ in range(sum(self.layer_layout[1:]))]).unsqueeze(-1)
         return input_nodes
 
-    def __getitem__(self, idx):
-        poisoned_idx, clean_idx = self.paired_indices[idx]
+    # def __getitem__(self, idx):
+    #     poisoned_idx, clean_idx = self.paired_indices[idx]
 
-        def process_model(model_idx):
-            weights = [torch.from_numpy(w[model_idx]) for w in self.weights]
-            biases = [torch.from_numpy(b[model_idx]) for b in self.biases]
-            activation = self.metrics.iloc[model_idx]['config.activation']
+    #     def process_model(model_idx):
+    #         weights = [torch.from_numpy(w[model_idx]) for w in self.weights]
+    #         biases = [torch.from_numpy(b[model_idx]) for b in self.biases]
+    #         activation = self.metrics.iloc[model_idx]['config.activation']
 
-            conv_mask = [1 if w.ndim == 4 else 0 for w in weights]
-            layer_layout = [weights[0].shape[1]] + [v.shape[0] for v in biases]
+    #         conv_mask = [1 if w.ndim == 4 else 0 for w in weights]
+    #         layer_layout = [weights[0].shape[1]] + [v.shape[0] for v in biases]
 
-            processed_weights = [
-                self._transform_weights_biases(w, self.max_kernel_size,
-                                               linear_as_conv=self.linear_as_conv)
-                for w in weights
-            ]
-            processed_biases = [
-                self._transform_weights_biases(b, self.max_kernel_size,
-                                               linear_as_conv=self.linear_as_conv)
-                for b in biases
-            ]
+    #         processed_weights = [
+    #             self._transform_weights_biases(w, self.max_kernel_size,
+    #                                            linear_as_conv=self.linear_as_conv)
+    #             for w in weights
+    #         ]
+    #         processed_biases = [
+    #             self._transform_weights_biases(b, self.max_kernel_size,
+    #                                            linear_as_conv=self.linear_as_conv)
+    #             for b in biases
+    #         ]
 
-            return cnn_to_tg_data(
-                processed_weights,
-                processed_biases,
-                conv_mask,
-                self.direction,
-                fmap_size=1 if self.flattening_method is None else NotImplemented,
-                layer_layout=layer_layout,
-                node2type=self.node2type if self.node_pos_embed else None,
-                edge2type=self.edge2type if self.edge_pos_embed else None,
-                mask_hidden=self.hidden_nodes if self.equiv_on_hidden else None,
-                mask_first_layer=self.first_layer_nodes if self.get_first_layer_mask else None,
-                sign_mask=activation == 'tanh'
-            )
+    #         return cnn_to_tg_data(
+    #             processed_weights,
+    #             processed_biases,
+    #             conv_mask,
+    #             self.direction,
+    #             fmap_size=1 if self.flattening_method is None else NotImplemented,
+    #             layer_layout=layer_layout,
+    #             node2type=self.node2type if self.node_pos_embed else None,
+    #             edge2type=self.edge2type if self.edge_pos_embed else None,
+    #             mask_hidden=self.hidden_nodes if self.equiv_on_hidden else None,
+    #             mask_first_layer=self.first_layer_nodes if self.get_first_layer_mask else None,
+    #             sign_mask=activation == 'tanh'
+    #         )
         
-        return (
-            process_model(poisoned_idx),
-            process_model(clean_idx),
-        )
+    #     return (
+    #         process_model(poisoned_idx),
+    #         process_model(clean_idx),
+    #     )
+
+    def __getitem__(self, idx):
+        p_idx, h_idx = self.paired_indices[idx]
+
+        def build(batch_w, batch_b, model_idx):
+            weights = [ self._transform_weights_biases(
+                            torch.from_numpy(w[model_idx]),
+                            self.max_kernel_size,
+                            linear_as_conv=self.linear_as_conv)
+                        for w in batch_w ]
+            biases  = [ self._transform_weights_biases(
+                            torch.from_numpy(b[model_idx]),
+                            self.max_kernel_size,
+                            linear_as_conv=self.linear_as_conv)
+                        for b in batch_b ]
+            return CNNBatch(weights=tuple(weights), biases=tuple(biases), y=0.0)
+
+        poisoned_batch = build(self.weights_p, self.biases_p, p_idx)
+        healthy_batch  = build(self.weights_h, self.biases_h, h_idx)
+
+        params = torch.zeros(0)
+        return params, poisoned_batch, healthy_batch
 
 def cnn_to_graph(
         weights,

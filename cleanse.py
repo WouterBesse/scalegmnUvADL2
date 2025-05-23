@@ -11,7 +11,7 @@ from src.scalegmn.models import ScaleGMN_equiv
 from src.utils.loss import select_criterion
 from src.utils.optim import setup_optimization
 from src.utils.helpers import overwrite_conf, count_parameters, set_seed, mask_input, mask_hidden
-from src.scalegmn.inr import BatchSiren
+
 import wandb
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
 
@@ -63,7 +63,7 @@ def main(args=None):
     print(f'Len val set: {len(val_set)}')
     print(f'Len test set: {len(test_set)}')
 
-    inr_model = BatchSiren(**conf['inr_model']).to(device)
+
 
     train_loader = torch_geometric.loader.DataLoader(
         dataset=train_set,
@@ -127,21 +127,28 @@ def main(args=None):
 
     for epoch in epoch_iter:
         for i, batch in enumerate(train_loader):
-            params, w_b, img, input_image = batch
+            params, w_b_p, w_b_h = batch
             params = params.to(device)
-            w_b = w_b.to(device)
-            weights = w_b.weights
-            biases = w_b.biases
-            img = img.to(device)
+            w_b_p  = w_b_p.to(device)
+            w_b_h  = w_b_h.to(device)
+
+            weights        = w_b_p.weights
+            biases         = w_b_p.biases
+            target_weights = w_b_h.weights
+            target_biases  = w_b_h.biases
 
             optimizer.zero_grad()
 
             delta_weights, delta_biases = net(params, weights, biases)
             new_weights, new_biases = residual_param_update(weights, biases, delta_weights, delta_biases)
 
-            outs = inr_model(new_weights, new_biases)
-            outs = rearrange(outs, "b (h w) c -> b c h w", h=conf['data']['image_size'][0])
-            loss = criterion(outs, img)
+            loss = 0.0
+            for nw, hw in zip(new_weights, target_weights):
+                loss += criterion(nw, hw)
+            for nb, hb in zip(new_biases, target_biases):
+                loss += criterion(nb, hb)
+            # average over all weight & bias tensors
+            loss = loss / (len(new_weights) + len(new_biases))
             loss.backward()
 
             log = {
@@ -160,39 +167,24 @@ def main(args=None):
                 scheduler[0].step()
 
             if conf["wandb"]:
-                if i == 0:
-                    (
-                        log["train/imgs/gt"],
-                        log["train/imgs/pred"],
-                        log["train/imgs/input"],
-                    ) = log_images(
-                        img[: conf['log_n_imgs']],
-                        outs[: conf['log_n_imgs']],
-                        input_image[: conf['log_n_imgs']]
-                    )
-                wandb.log(log)
+                wandb.log(log, step=global_step)
 
-                epoch_iter.set_description(
-                    f"[{epoch} {i+1}], train loss: {loss.item():.3f}, test_loss: {test_loss:.3f}"
-                )
+
+            epoch_iter.set_description(
+                f"[{epoch} {i+1}], train loss: {loss.item():.3f}, test_loss: {test_loss:.3f}"
+            )
             global_step += 1
 
             if (global_step + 1) % conf['train_args']['eval_every'] == 0:
                 val_loss_dict = evaluate(
                     net,
                     val_loader,
-                    device,
-                    inr_model,
-                    img_shape=conf['data']['image_size'],
-                    log_n_imgs=conf['log_n_imgs'],
+                    device
                 )
                 test_loss_dict = evaluate(
                     net,
                     test_loader,
-                    device,
-                    inr_model,
-                    img_shape=conf['data']['image_size'],
-                    log_n_imgs=conf['log_n_imgs'],
+                    device
                 )
 
                 val_loss = val_loss_dict["avg_loss"]
@@ -201,10 +193,7 @@ def main(args=None):
                     net,
                     train_loader,
                     device,
-                    inr_model,
-                    img_shape=conf['data']['image_size'],
-                    log_n_imgs=conf['log_n_imgs'],
-                    num_batches=100,
+                    num_batches=100
                 )
 
                 best_val_criteria = val_loss < best_val_loss
@@ -227,59 +216,55 @@ def main(args=None):
                     wandb.log(log)
 
 
+
 @torch.no_grad()
-def evaluate(
-    model,
-    loader,
-    device,
-    inr_model,
-    img_shape=(28, 28),
-    log_n_imgs=0,
-    num_batches=None,
-):
+def evaluate(model, loader, device, num_batches=None):
+    """
+    Compute average parameter-MSE between the hypernetwork's output
+    (poisoned + delta → “cleansed”) and the true healthy weights.
+
+    Args:
+        model:           your ScaleGMN_equiv hypernetwork
+        loader:          DataLoader yielding (params, poisoned_batch, healthy_batch)
+        device:          torch device
+        num_batches:     if set, only process up to this many minibatches
+
+    Returns:
+        dict with key "avg_loss" → scalar MSE
+    """
     model.eval()
-    log_n_imgs = min(log_n_imgs, loader.batch_size)
-    imgs, preds, input_imgs = [], [], []
     losses = []
     for i, batch in enumerate(loader):
         if num_batches is not None and i >= num_batches:
             break
-        params, w_b, img, input_image = batch
-        params = params.to(device)
-        w_b = w_b.to(device)
-        weights = w_b.weights
-        biases = w_b.biases
-        img = img.to(device)
 
-        delta_weights, delta_biases = model(params, weights, biases)
-        new_weights, new_biases = residual_param_update(weights, biases, delta_weights, delta_biases)
+        params, poisoned, healthy = batch
+        params   = params.to(device)
+        poisoned = poisoned.to(device)
+        healthy  = healthy.to(device)
 
-        outs = inr_model(new_weights, new_biases)
-        outs = rearrange(outs, "b (h w) c -> b c h w", h=img_shape[0])
-        loss = ((outs - img) ** 2).mean(dim=(1, 2, 3))
-        losses.append(loss.detach().cpu())
+        # forward hypernet
+        delta_w, delta_b = model(params, poisoned.weights, poisoned.biases)
+        new_w,   new_b   = residual_param_update(poisoned.weights,
+                                                 poisoned.biases,
+                                                 delta_w, delta_b)
 
-        if i == 0 and log_n_imgs > 0:
-            gt_img_plots, pred_img_plots, input_img_plots = log_images(
-                img[:log_n_imgs],
-                outs[:log_n_imgs],
-                input_image[:log_n_imgs]
-            )
-            imgs.extend(gt_img_plots)
-            preds.extend(pred_img_plots)
-            input_imgs.extend(input_img_plots)
+        # compute parameter-space MSE
+        batch_loss = 0.0
+        # weights
+        for nw, hw in zip(new_w, healthy.weights):
+            batch_loss += ((nw - hw) ** 2).mean()
+        # biases
+        for nb, hb in zip(new_b, healthy.biases):
+            batch_loss += ((nb - hb) ** 2).mean()
+        # normalize per-tensor
+        batch_loss = batch_loss / (len(new_w) + len(new_b))
 
-    losses = torch.cat(losses)
-    losses = losses.mean()
+        losses.append(batch_loss.cpu())
 
+    avg_loss = torch.stack(losses).mean().item()
     model.train()
-    return {
-        "avg_loss": losses,
-        "imgs/gt": imgs,
-        "imgs/pred": preds,
-        "imgs/input": input_imgs,
-    }
-
+    return {"avg_loss": avg_loss}
 
 def residual_param_update(weights, biases, delta_weights, delta_biases):
     new_weights = [weights[j] + delta_weights[j] for j in range(len(weights))]

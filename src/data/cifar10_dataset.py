@@ -839,13 +839,39 @@ class TrojCleanseZooDataset(CNNDataset):
                             self.max_kernel_size,
                             linear_as_conv=self.linear_as_conv)
                         for b in batch_b ]
-            return CNNBatch(weights=tuple(weights), biases=tuple(biases), y=0.0)
+            
+            activation_function = self.metrics_h.iloc[model_idx]['config.activation']
+            conv_mask = [1 if w.ndim == 4 else 0 for w in weights]
+            layer_layout = [weights[0].shape[1]] + [v.shape[0] for v in biases]
+            if self.flattening_method is None:
+                final_feature_map_size = 1
+            else:
+                raise NotImplementedError
+            
+            weights = tuple(weights)
+            biases = tuple(biases)
 
-        poisoned_batch = build(self.weights_p, self.biases_p, p_idx)
+            data = cnn_to_tg_data(
+                weights,
+                biases,
+                conv_mask,
+                self.direction,
+                fmap_size=final_feature_map_size,
+                layer_layout=layer_layout,
+                node2type=self.node2type if self.node_pos_embed else None,
+                edge2type=self.edge2type if self.edge_pos_embed else None,
+                mask_hidden=self.hidden_nodes if self.equiv_on_hidden else None,
+                mask_first_layer=self.first_layer_nodes if self.get_first_layer_mask else None,
+                sign_mask=activation_function == 'tanh'
+            )
+            
+            return data
+
         healthy_batch  = build(self.weights_h, self.biases_h, h_idx)
+        poisoned_batch = build(self.weights_p, self.biases_p, p_idx)
 
-        params = torch.zeros(0)
-        return params, poisoned_batch, healthy_batch
+        # params = torch.zeros(0)
+        return poisoned_batch, healthy_batch
 
 def cnn_to_graph(
         weights,

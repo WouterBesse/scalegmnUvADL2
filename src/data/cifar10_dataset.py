@@ -704,11 +704,13 @@ class TrojCleanseZooDataset(CNNDataset):
         data_h    = data  [mask_h]
         data_p    = data  [mask_p]
 
-        # if activation_function is not None:
-        #     #metrics = metrics.iloc[idcs]
-        #     mask = metrics['config.activation'] == activation_function
-        #     metrics = metrics[mask]
-        #     data = data[mask]
+        if activation_function is not None:
+            mask_h = metrics_h['config.activation'] == activation_function
+            metrics_h = metrics_h[mask_h]
+            data_h = data_h[mask_h]
+            mask_p = metrics_p['config.activation'] == activation_function
+            metrics_p = metrics_p[mask_p]
+            data_p = data_p[mask_p]
 
         self.metrics_h, self.data_h = metrics_h, data_h
         self.metrics_p, self.data_p = metrics_p, data_p
@@ -768,8 +770,8 @@ class TrojCleanseZooDataset(CNNDataset):
         self.flattening_method = flattening_method
         self.max_num_hidden_layers = max_num_hidden_layers
 
-        # if data_format not in ("graph", "nfn"):
-        #     raise ValueError(f"data_format {data_format} not recognized.")
+        if data_format not in ("graph", "nfn"):
+            raise ValueError(f"data_format {data_format} not recognized.")
         self.data_format = data_format
 
         if self.node_pos_embed:

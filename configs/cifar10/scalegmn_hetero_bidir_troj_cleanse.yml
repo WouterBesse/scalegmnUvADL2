@@ -14,7 +14,7 @@ data:
   layer_layout: [1, 16, 16, 16, 10]
 
 train_args:
-  num_epochs: 250
+  num_epochs: 2
   #val_acc_threshold: 0.1
   patience: 50
   seed: 0
@@ -27,10 +27,11 @@ scalegmn_args:
   d_hid: &d_hid 128  # hidden dimension
   num_layers: 2 # number of gnn layers to apply
   direction: bidirectional
-  equivariant: False
-  symmetry: hetero  # symmetry
+  equivariant: True
+  symmetry: sign  # symmetry
   jit: False # prefer compile - compile gnn to optimize performance
   compile: False # compile gnn to optimize performance
+  
   out_scale: 1.0
   readout_range: last_layer  # or full_graph
   gnn_skip_connections: True

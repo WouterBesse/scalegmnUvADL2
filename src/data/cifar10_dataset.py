@@ -642,6 +642,11 @@ class TrojCleanseZooDataset(CNNDataset):
             data_format="graph",
     ):
 
+        # /cns/ym-d/home/brain-ber/dnn_science/unterthiner/smallcnnzoo/cifar10/11169340/1/permanent_ckpt-0,relu,zeros,cifar10,cnn,0.4567782701009898,86,20,0.0090177900321737,4.206821739479533e-07,0.0054663821232292,3,16,adam,0,1.0,glorot_normal,/cns/ym-d/home/brain-ber/dnn_science/unterthiner/smallcnnzoo/cifar10/11169340/1,0,0.0811000019311904,2.308499574661255,0.0847092494368553,2.308099881889894,False,0
+        # /cns/ym-d/home/brain-ber/dnn_science/unterthiner/smallcnnzoo/cifar10/11169340/1/permanent_ckpt-86,relu,zeros,cifar10,cnn,0.4567782701009898,86,20,0.0090177900321737,4.206821739479533e-07,0.0054663821232292,3,16,adam,0,1.0,glorot_normal,/cns/ym-d/home/brain-ber/dnn_science/unterthiner/smallcnnzoo/cifar10/11169340/1,86,0.4762000143527985,1.4915859699249268,0.4746899306774139,1.4848840838855075,True,0
+        # /cns/ym-d/home/brain-ber/dnn_science/unterthiner/smallcnnzoo/cifar10/11169340/1/permanent_ckpt-2.pth,relu,zeros,cifar10,cnn,0.02,86,20,0.0090177900321737,0.0000000003,0.02,3,16,adam,0,1.0,glorot_normal,/cns/ym-d/home/brain-ber/dnn_science/unterthiner/smallcnnzoo/cifar10/11169340/1,86,0.0811000019311904,2.308499574661255,0.0847092494368553,2.308099881889894,TRUE,1
+
+
         self.node_pos_embed = node_pos_embed
         self.edge_pos_embed = edge_pos_embed
         self.layer_layout = layer_layout
@@ -657,74 +662,60 @@ class TrojCleanseZooDataset(CNNDataset):
             np.savetxt(idcs_file, indices, delimiter=",", fmt="%d")
             
         shuffled_idcs = pd.read_csv(idcs_file, header=None).values.flatten()
-        print(f"Data len: {len(data)}, data shape 0: {data.shape[0]}")
-        data = data[shuffled_idcs]
 
         # metrics = pd.read_csv(os.path.join(metrics_path))
         if metrics_path.endswith(".gz"):
             metrics = pd.read_csv(metrics_path, compression="gzip")
         else:
             metrics = pd.read_csv(metrics_path)
+        metrics["idx"] = np.arange(len(metrics))
+        metrics = metrics.iloc[shuffled_idcs]
         metrics = metrics.rename(columns={metrics.columns[0]: "model_id"})
 
-        print(f"Metrics len: {metrics.shape[0]}")
-        print(f"Indices len: {shuffled_idcs.shape[0]}")
-        metrics = metrics.iloc[shuffled_idcs]
+        metrics["group_id"] = (
+            metrics["model_id"]
+            .str
+            .replace(r"permanent_ckpt-\d+.*$", "", regex=True)
+        )
+
+        metrics["laststep"] = (
+            (metrics["poisoned"] == 1) & (metrics["model_id"].str.contains(r"permanent_ckpt-2.*$"))
+            | (metrics["poisoned"] == 0) & (metrics["step"] == 86)
+        )
+
+        metrics = metrics.groupby("group_id").filter(
+            lambda x: len(x) >= 2 and x["poisoned"].sum() >= 1
+        )
+
+        metrics.reset_index(drop=True, inplace=True)
+        data = data[metrics["idx"].values]
+
         self.layout = pd.read_csv(layout_path)
-        # filter to final-stage weights ("step" == 86 in metrics)
-        isfinal = metrics["step"] == 86
+        isfinal = metrics["laststep"] == True
         metrics = metrics[isfinal]
         data = data[isfinal]
         assert np.isfinite(data).all()
 
-        # form a group identifier by removing that suffix
-        metrics["group_id"] = (
-            metrics["model_id"]
-            .str
-            .replace(r"/permanent_ckpt-\d+$", "", regex=True)
-        )
-
-        inject_step = 2     # or whatever your poison‐injection step is
-        mask_h = (metrics["poisoned"] == 0) & (metrics["step"] == 86)
-        mask_p = (metrics["poisoned"] == 1) & (metrics["step"] == inject_step)
+        mask_h = (metrics["poisoned"] == 0) & (metrics["model_id"].str.contains(r"permanent_ckpt-86.*$"))
+        mask_p = (metrics["poisoned"] == 1) & (metrics["model_id"].str.contains(r"permanent_ckpt-2.*$"))
 
         metrics_h = metrics[mask_h].reset_index(drop=True)
         metrics_p = metrics[mask_p].reset_index(drop=True)
         data_h    = data  [mask_h]
         data_p    = data  [mask_p]
 
-        #metrics.index = np.arange(0, len(metrics))
-        #idcs = self._split_indices_iid(data)[split]
-        #data = data[idcs]
-        if activation_function is not None:
-            #metrics = metrics.iloc[idcs]
-            mask = metrics['config.activation'] == activation_function
-            metrics = metrics[mask]
-            data = data[mask]
-        #else:
-            #self.metrics = metrics.iloc[idcs]
+        # if activation_function is not None:
+        #     #metrics = metrics.iloc[idcs]
+        #     mask = metrics['config.activation'] == activation_function
+        #     metrics = metrics[mask]
+        #     data = data[mask]
+
         self.metrics_h, self.data_h = metrics_h, data_h
         self.metrics_p, self.data_p = metrics_p, data_p
 
         # build two sets of raw numpy slices
         self.weights_h, self.biases_h = [], []
         self.weights_p, self.biases_p = [], []
-
-        # for i, row in self.layout.iterrows():
-        #     arr = data[:, row["start_idx"]:row["end_idx"]]
-        #     bs = arr.shape[0]
-        #     arr = arr.reshape((bs, *eval(row["shape"])))
-        #     if row["varname"].endswith("kernel:0"):
-        #         # tf to pytorch ordering
-        #         if arr.ndim == 5:
-        #             arr = arr.transpose(0, 4, 3, 1, 2)
-        #         elif arr.ndim == 3:
-        #             arr = arr.transpose(0, 2, 1)
-        #         self.weights.append(arr)
-        #     elif row["varname"].endswith("bias:0"):
-        #         self.biases.append(arr)
-        #     else:
-        #         raise ValueError(f"varname {row['varname']} not recognized.")
 
         for _, row in self.layout.iterrows():
             start, end = row["start_idx"], row["end_idx"]
@@ -831,47 +822,6 @@ class TrojCleanseZooDataset(CNNDataset):
             [True for _ in range(self.layer_layout[0])] +
             [False for _ in range(sum(self.layer_layout[1:]))]).unsqueeze(-1)
         return input_nodes
-
-    # def __getitem__(self, idx):
-    #     poisoned_idx, clean_idx = self.paired_indices[idx]
-
-    #     def process_model(model_idx):
-    #         weights = [torch.from_numpy(w[model_idx]) for w in self.weights]
-    #         biases = [torch.from_numpy(b[model_idx]) for b in self.biases]
-    #         activation = self.metrics.iloc[model_idx]['config.activation']
-
-    #         conv_mask = [1 if w.ndim == 4 else 0 for w in weights]
-    #         layer_layout = [weights[0].shape[1]] + [v.shape[0] for v in biases]
-
-    #         processed_weights = [
-    #             self._transform_weights_biases(w, self.max_kernel_size,
-    #                                            linear_as_conv=self.linear_as_conv)
-    #             for w in weights
-    #         ]
-    #         processed_biases = [
-    #             self._transform_weights_biases(b, self.max_kernel_size,
-    #                                            linear_as_conv=self.linear_as_conv)
-    #             for b in biases
-    #         ]
-
-    #         return cnn_to_tg_data(
-    #             processed_weights,
-    #             processed_biases,
-    #             conv_mask,
-    #             self.direction,
-    #             fmap_size=1 if self.flattening_method is None else NotImplemented,
-    #             layer_layout=layer_layout,
-    #             node2type=self.node2type if self.node_pos_embed else None,
-    #             edge2type=self.edge2type if self.edge_pos_embed else None,
-    #             mask_hidden=self.hidden_nodes if self.equiv_on_hidden else None,
-    #             mask_first_layer=self.first_layer_nodes if self.get_first_layer_mask else None,
-    #             sign_mask=activation == 'tanh'
-    #         )
-        
-    #     return (
-    #         process_model(poisoned_idx),
-    #         process_model(clean_idx),
-    #     )
 
     def __getitem__(self, idx):
         p_idx, h_idx = self.paired_indices[idx]

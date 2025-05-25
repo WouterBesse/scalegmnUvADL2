@@ -691,6 +691,14 @@ class TrojCleanseZooDataset(CNNDataset):
         data = data[metrics["idx"].values]
 
         self.layout = pd.read_csv(layout_path)
+
+        # attempt to fix a dimensional mismatch error
+        conv_rows = self.layout[self.layout.varname.str.endswith("kernel:0")]
+        shapes   = conv_rows["shape"].map(eval)
+        max_h    = max(s[-2] for s in shapes)
+        max_w    = max(s[-1] for s in shapes)
+        self.max_kernel_size = (max_h, max_w)
+
         isfinal = metrics["laststep"] == True
         metrics = metrics[isfinal]
         data = data[isfinal]
@@ -864,6 +872,9 @@ class TrojCleanseZooDataset(CNNDataset):
                 mask_first_layer=self.first_layer_nodes if self.get_first_layer_mask else None,
                 sign_mask=activation_function == 'tanh'
             )
+
+            data.weights = weights
+            data.biases  = biases
             
             return data
 

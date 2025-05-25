@@ -126,84 +126,70 @@ def main(args=None):
     optimizer.zero_grad()
 
     for epoch in epoch_iter:
-        for i, batch in enumerate(train_loader):
-            params, w_b_p, w_b_h = batch
-            params = params.to(device)
-            w_b_p  = w_b_p.to(device)
-            w_b_h  = w_b_h.to(device)
+        for i, (poisoned_batch, healthy_batch) in enumerate(train_loader):
+            # Move graph‐structure tensors to device
+            poisoned_batch = poisoned_batch.to(device)
+            healthy_batch  = healthy_batch.to(device)
 
-            weights        = w_b_p.weights
-            biases         = w_b_p.biases
-            target_weights = w_b_h.weights
-            target_biases  = w_b_h.biases
+            # Manually move your raw weight/bias lists to device
+            weights_p = [w.to(device) for w in poisoned_batch.weights]
+            biases_p  = [b.to(device) for b in poisoned_batch.biases]
+            weights_h = [w.to(device) for w in healthy_batch.weights]
+            biases_h  = [b.to(device) for b in healthy_batch.biases]
 
             optimizer.zero_grad()
 
-            delta_weights, delta_biases = net(params, weights, biases)
-            new_weights, new_biases = residual_param_update(weights, biases, delta_weights, delta_biases)
+            # Predict and apply deltas to the poisoned model
+            delta_w, delta_b = net(poisoned_batch, weights_p, biases_p)
+            new_w, new_b     = residual_param_update(weights_p, biases_p, delta_w, delta_b)
 
+            # Compute MSE against the healthy weights
             loss = 0.0
-            for nw, hw in zip(new_weights, target_weights):
+            for nw, hw in zip(new_w, weights_h):
                 loss += criterion(nw, hw)
-            for nb, hb in zip(new_biases, target_biases):
+            for nb, hb in zip(new_b, biases_h):
                 loss += criterion(nb, hb)
-            # average over all weight & bias tensors
-            loss = loss / (len(new_weights) + len(new_biases))
+            loss = loss / (len(new_w) + len(new_b))
+
             loss.backward()
-
-            log = {
-                "train/loss": loss.item(),
-                "global_step": global_step,
-            }
-
             if conf['optimization']['clip_grad']:
-                grad_norm = torch.nn.utils.clip_grad_norm_(list(filter(lambda p: p.requires_grad, net.parameters())), conf['optimization']['clip_grad_max_norm'])
-                log["grad_norm"] = grad_norm
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    net.parameters(),
+                    conf['optimization']['clip_grad_max_norm']
+                )
+                log = {"train/loss": loss.item(), "grad_norm": grad_norm}
+            else:
+                log = {"train/loss": loss.item()}
 
             optimizer.step()
-
             if scheduler[1] is not None and scheduler[1] != 'ReduceLROnPlateau':
                 log["lr"] = scheduler[0].get_last_lr()[0]
                 scheduler[0].step()
 
             if conf["wandb"]:
+                log["global_step"] = global_step
                 wandb.log(log, step=global_step)
 
-
             epoch_iter.set_description(
-                f"[{epoch} {i+1}], train loss: {loss.item():.3f}, test_loss: {test_loss:.3f}"
+                f"[{epoch} {i+1}], train loss: {loss.item():.3f}"
             )
             global_step += 1
 
-            if (global_step + 1) % conf['train_args']['eval_every'] == 0:
-                val_loss_dict = evaluate(
-                    net,
-                    val_loader,
-                    device
-                )
-                test_loss_dict = evaluate(
-                    net,
-                    test_loader,
-                    device
-                )
+            if (global_step) % conf['train_args']['eval_every'] == 0:
+                val_loss_dict = evaluate(net, val_loader, device)
+                test_loss_dict = evaluate(net, test_loader, device)
 
                 val_loss = val_loss_dict["avg_loss"]
                 test_loss = test_loss_dict["avg_loss"]
-                train_loss_dict = evaluate(
-                    net,
-                    train_loader,
-                    device,
-                    num_batches=100
-                )
+                train_loss_dict = evaluate(net, train_loader, device, num_batches=100)
 
-                best_val_criteria = val_loss < best_val_loss
-
-                if best_val_criteria:
-                    best_test_results = test_loss_dict
+                if val_loss < best_val_loss:
+                    best_val_loss   = val_loss
                     best_val_results = val_loss_dict
-                    best_val_loss = val_loss
+                    best_test_results = test_loss_dict
+
                 if conf["wandb"]:
-                    log = {
+                    wandb.log({
                         "train/avg_loss": train_loss_dict["avg_loss"],
                         "val/best_loss": best_val_results["avg_loss"],
                         "test/best_loss": best_test_results["avg_loss"],
@@ -211,10 +197,7 @@ def main(args=None):
                         **{f"test/{k}": v for k, v in test_loss_dict.items()},
                         "epoch": epoch,
                         "global_step": global_step,
-                    }
-
-                    wandb.log(log)
-
+                    })
 
 
 @torch.no_grad()
@@ -222,42 +205,33 @@ def evaluate(model, loader, device, num_batches=None):
     """
     Compute average parameter-MSE between the hypernetwork's output
     (poisoned + delta → “cleansed”) and the true healthy weights.
-
-    Args:
-        model:           your ScaleGMN_equiv hypernetwork
-        loader:          DataLoader yielding (params, poisoned_batch, healthy_batch)
-        device:          torch device
-        num_batches:     if set, only process up to this many minibatches
-
-    Returns:
-        dict with key "avg_loss" → scalar MSE
     """
     model.eval()
     losses = []
-    for i, batch in enumerate(loader):
+    for i, (poisoned_batch, healthy_batch) in enumerate(loader):
         if num_batches is not None and i >= num_batches:
             break
 
-        params, poisoned, healthy = batch
-        params   = params.to(device)
-        poisoned = poisoned.to(device)
-        healthy  = healthy.to(device)
+        # 1) Move graph‐structure tensors to device
+        poisoned_batch = poisoned_batch.to(device)
+        healthy_batch  = healthy_batch.to(device)
 
-        # forward hypernet
-        delta_w, delta_b = model(params, poisoned.weights, poisoned.biases)
-        new_w,   new_b   = residual_param_update(poisoned.weights,
-                                                 poisoned.biases,
-                                                 delta_w, delta_b)
+        # 2) Move raw weight/bias lists to device
+        w_p = [w.to(device) for w in poisoned_batch.weights]
+        b_p = [b.to(device) for b in poisoned_batch.biases]
+        w_h = [w.to(device) for w in healthy_batch.weights]
+        b_h = [b.to(device) for b in healthy_batch.biases]
 
-        # compute parameter-space MSE
+        # 3) Forward through the hypernetwork
+        delta_w, delta_b = model(poisoned_batch, w_p, b_p)
+        new_w,   new_b   = residual_param_update(w_p, b_p, delta_w, delta_b)
+
+        # 4) Compute parameter-space MSE against the healthy weights
         batch_loss = 0.0
-        # weights
-        for nw, hw in zip(new_w, healthy.weights):
+        for nw, hw in zip(new_w, w_h):
             batch_loss += ((nw - hw) ** 2).mean()
-        # biases
-        for nb, hb in zip(new_b, healthy.biases):
+        for nb, hb in zip(new_b, b_h):
             batch_loss += ((nb - hb) ** 2).mean()
-        # normalize per-tensor
         batch_loss = batch_loss / (len(new_w) + len(new_b))
 
         losses.append(batch_loss.cpu())
@@ -266,21 +240,14 @@ def evaluate(model, loader, device, num_batches=None):
     model.train()
     return {"avg_loss": avg_loss}
 
+
+
 def residual_param_update(weights, biases, delta_weights, delta_biases):
     new_weights = [weights[j] + delta_weights[j] for j in range(len(weights))]
     new_biases = [biases[j] + delta_biases[j] for j in range(len(weights))]
     return new_weights, new_biases
 
 
-def log_images(gt_images, pred_images, input_images):
-    _gt_images = gt_images.detach().permute(0, 2, 3, 1).cpu().numpy()
-    _pred_images = pred_images.detach().permute(0, 2, 3, 1).cpu().numpy()
-    _input_images = input_images.detach().permute(0, 2, 3, 1).cpu().numpy()
-    _pred_images = np.clip(_pred_images, 0.0, 1.0)
-    gt_img_plots = [wandb.Image(img) for img in gt_images]
-    pred_img_plots = [wandb.Image(img) for img in pred_images]
-    input_img_plots = [wandb.Image(img) for img in _input_images]
-    return gt_img_plots, pred_img_plots, input_img_plots
 
 if __name__ == '__main__':
     arg_parser = setup_arg_parser()

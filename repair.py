@@ -154,24 +154,26 @@ def main(args=None):
             # Predict and apply deltas to the poisoned model
             # delta_w, delta_b = net(poisoned_batch, weights_h, biases_h)
             # new_w, new_b     = residual_param_update(weights_p, biases_p, delta_w, delta_b)
-            # print(poisoned_batch)
-            new_w, new_b = net(poisoned_batch, weights_p, biases_p)
-            new_w = [w.squeeze(-1) for w in new_w]
-            # because scale equivariance, model outputs one bias, reshape to match input
-            new_b = [b.squeeze(-1).repeat(w.shape[1], 1) for b, w in zip(new_b, new_w)]
+            print(poisoned_batch)
+            delta_w, delta_b = net(poisoned_batch, weights_p, biases_p)
+            delta_w = [w.squeeze(-1) for w in delta_w]
+            delta_b = [b.squeeze(-1).repeat(w.shape[1], 1) for b, w in zip(delta_b, delta_w)]
 
-            # print(f"new_w: {[w.shape for w in new_w]}")
-            # print(f"new_b: {[b.shape for b in new_b]}")
-            # print(f"weights_h: {[w.shape for w in weights_h]}")
-            # print(f"biases_h: {[b.shape for b in biases_h]}")
+            print(f"delta_w: {[w.shape for w in delta_w]}")
+            print(f"delta_b: {[b.shape for b in delta_b]}")
+            print(f"weights_h: {[w.shape for w in weights_h]}")
+            print(f"biases_h: {[b.shape for b in biases_h]}")
+
+            new_w = [weights_p[j] + delta_w[j] for j in range(len(weights_p))]
+            new_b = [biases_p[j] + delta_b[j] for j in range(len(biases_p))]
 
             # Compute MSE against the healthy weights
             loss = 0.0
             for nw, hw in zip(new_w, weights_h):
-                # print(nw.shape, hw.shape)
+                print(nw.shape, hw.shape)
                 loss += criterion(nw, hw)
             for nb, hb in zip(new_b, biases_h):
-                # print(nb.shape, hb.shape)
+                print(nb.shape, hb.shape)
                 loss += criterion(nb, hb)
             loss = loss / (len(new_w) + len(new_b))
 
@@ -247,12 +249,14 @@ def evaluate(model, loader, device, num_batches=None):
         b_h = [b.to(device) for b in healthy_batch.biases]
 
         # 3) Forward through the hypernetwork
-        # delta_w, delta_b = model(poisoned_batch, w_p, b_p)
+        delta_w, delta_b = model(poisoned_batch, w_p, b_p)
         # new_w,   new_b   = residual_param_update(w_p, b_p, delta_w, delta_b)
-        new_w, new_b = model(poisoned_batch, w_p, b_p)
-        new_w = [w.squeeze(-1) for w in new_w]
+        delta_w = [w.squeeze(-1) for w in delta_w]
         # because scale equivariance, model outputs one bias, reshape to match input
-        new_b = [b.squeeze(-1).repeat(w.shape[1], 1) for b, w in zip(new_b, new_w)]
+        delta_b = [b.squeeze(-1).repeat(w.shape[1], 1) for b, w in zip(delta_b, delta_w)]
+
+        new_w = [w_p[j] + delta_w[j] for j in range(len(w_p))]
+        new_b = [b_p[j] + delta_b[j] for j in range(len(b_p))]
 
         # 4) Compute parameter-space MSE against the healthy weights
         batch_loss = 0.0

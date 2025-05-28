@@ -850,7 +850,8 @@ class TrojCleanseZooDataset(CNNDataset):
             
             activation_function = self.metrics_h.iloc[model_idx]['config.activation']
             conv_mask = [1 if w.ndim == 4 else 0 for w in weights]
-            layer_layout = [weights[0].shape[1]] + [v.shape[0] for v in biases]
+            # layer_layout = [weights[0].shape[1]] + [v.shape[0] for v in biases]
+            layer_layout = self.layer_layout if self.layer_layout is not None else [weights[0].shape[1]] + [v.shape[0] for v in biases]
             if self.flattening_method is None:
                 final_feature_map_size = 1
             else:

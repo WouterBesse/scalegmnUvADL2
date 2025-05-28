@@ -154,26 +154,22 @@ def main(args=None):
             # Predict and apply deltas to the poisoned model
             # delta_w, delta_b = net(poisoned_batch, weights_h, biases_h)
             # new_w, new_b     = residual_param_update(weights_p, biases_p, delta_w, delta_b)
-            print(poisoned_batch)
+            # print(f"weights_p: {[w.shape for w in weights_p]}, biases_p: {[b.shape for b in biases_p]}")
+
             delta_w, delta_b = net(poisoned_batch, weights_p, biases_p)
-            delta_w = [w.squeeze(-1) for w in delta_w]
-            delta_b = [b.squeeze(-1).repeat(w.shape[1], 1) for b, w in zip(delta_b, delta_w)]
+            # print(f"delta_w: {[w.shape for w in delta_w]}, delta_b: {[b.shape for b in delta_b]}")
+            delta_w = [w.squeeze(-1).repeat(layer_size, 1, 1) for w, layer_size in zip(delta_w, poisoned_batch.layer_layout[0][:-1])]
+            delta_b = [b.squeeze(-1).repeat(layer_size, 1) for b, layer_size in zip(delta_b, poisoned_batch.layer_layout[0][1:])]
+            # print(f"delta_w: {[w.shape for w in delta_w]}, delta_b: {[b.shape for b in delta_b]}")
 
-            print(f"delta_w: {[w.shape for w in delta_w]}")
-            print(f"delta_b: {[b.shape for b in delta_b]}")
-            print(f"weights_h: {[w.shape for w in weights_h]}")
-            print(f"biases_h: {[b.shape for b in biases_h]}")
-
-            new_w = [weights_p[j] + delta_w[j] for j in range(len(weights_p))]
-            new_b = [biases_p[j] + delta_b[j] for j in range(len(biases_p))]
+            new_w = [weights_p[j] * delta_w[j] for j in range(len(weights_p))]
+            new_b = [biases_p[j] * delta_b[j] for j in range(len(biases_p))]
 
             # Compute MSE against the healthy weights
             loss = 0.0
             for nw, hw in zip(new_w, weights_h):
-                print(nw.shape, hw.shape)
                 loss += criterion(nw, hw)
             for nb, hb in zip(new_b, biases_h):
-                print(nb.shape, hb.shape)
                 loss += criterion(nb, hb)
             loss = loss / (len(new_w) + len(new_b))
 

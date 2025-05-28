@@ -1,4 +1,4 @@
-batch_size: 32
+batch_size: 2
 data:
   dataset: TrojCleanseZooDataset
   dataset_path: ./traindata/cifar10-rand/

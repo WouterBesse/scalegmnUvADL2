@@ -27,9 +27,8 @@ def main():
 
     print(yaml.dump(conf, default_flow_style=False))
     device = torch.device("cuda", args.gpu_ids[0]) if args.gpu_ids[0] >= 0 else torch.device("cpu")
-    if conf["wandb"]:
-        wandb.init(config=conf, **conf["wandb_args"])
-
+    
+    all_auc = []
     set_seed(conf['train_args']['seed'])
     # =============================================================================================
     #   SETUP DATASET AND DATALOADER
@@ -84,6 +83,8 @@ def main():
     # =============================================================================================
     #   DEFINE MODEL
     # =============================================================================================
+    if conf["wandb"]:
+        wandb.init(config=conf, **conf["wandb_args"])
     conf['scalegmn_args']["layer_layout"] = train_set.get_layer_layout()
     # conf['scalegmn_args']['input_nn'] = 'conv'
     net = ScaleGMN(conf['scalegmn_args'])
@@ -113,6 +114,7 @@ def main():
     # =============================================================================================
     step = 0
     best_val_auc = -float("inf")
+    no_improvement = 0
     best_train_auc_TRAIN = -float("inf")
     best_test_results, best_val_results, best_train_results, best_train_results_TRAIN = None, None, None, None
 
@@ -142,6 +144,7 @@ def main():
                 if conf["wandb"]:
                     if step % 10 == 0:
                         probs = torch.sigmoid(outputs.squeeze(-1))    # convert to probabilities
+                        print(probs[0:10].detach().cpu().numpy())
                         log[f"train/{conf['train_args']['loss']}"] = loss.detach().cpu().item()
                         # log["train/rsq"] = r2_score(gt_test_acc.cpu().numpy(), probs.detach().cpu().numpy())
                         log["train/auc"] = roc_auc_score(gt_test_acc.detach().cpu().numpy(), probs.detach().cpu().numpy())
@@ -168,6 +171,10 @@ def main():
                 best_test_results = test_loss_dict
                 best_val_results = val_loss_dict
                 best_train_results = train_loss_dict
+            else:
+                no_improvement += 1
+                if no_improvement >= conf['train_args']['patience'] or best_val_auc >= 1.0:
+                    all_auc.append(best_val_auc)
 
             best_train_criteria = train_loss_dict['auc'] >= best_train_auc_TRAIN
             if best_train_criteria:
@@ -199,6 +206,8 @@ def main():
                 }, step=step)
 
             net.train()  # redundant
+    # # pring average AUC
+    # print(f"Average AUC over {conf['train_args']['repeats']} runs: {np.mean(all_auc):.2f} ± {np.std(all_auc):.2f}")
 
 
 @torch.no_grad()

@@ -1,12 +1,12 @@
-batch_size: 64
+batch_size: 128
 wandb: True
 data:
   dataset: TrojDetZooDataset
-  dataset_path: ./traindata/cifar10-rand/
-  data_path: ./traindata/cifar10-rand/weights.npy
-  metrics_path: ./traindata/cifar10-rand/metrics.csv
-  layout_path: ./traindata/cifar10-rand/layout.csv
-  idcs_file: ./traindata/cifar10-rand/cifar10_split.csv
+  dataset_path: ./traindata/cifar10-randpreclean/
+  data_path: ./traindata/cifar10-randpreclean/weights_new.npy
+  metrics_path: ./traindata/cifar10-randpreclean/metrics_new.csv
+  layout_path: ./traindata/cifar10-randpreclean/layout.csv
+  idcs_file: ./traindata/cifar10-randpreclean/cifar10_split.csv
   activation_function: null
   node_pos_embed: &node_pos_embed True
   edge_pos_embed: &edge_pos_embed False
@@ -17,8 +17,10 @@ train_args:
   num_epochs: 250
   val_acc_threshold: 0.1
   patience: 50
-  seed: 0
+  seed: 69
   loss: BCELogits
+  repeats: 4
+  patience: 2
 
 scalegmn_args:
   d_in_v: &d_in_v 1  # initial dimension of input nn bias

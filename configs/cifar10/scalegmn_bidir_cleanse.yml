@@ -1,4 +1,4 @@
-batch_size: 2
+batch_size: 32
 data:
   dataset: TrojCleanseZooDataset
   dataset_path: ./traindata/cifar10-rand/
@@ -22,7 +22,7 @@ train_args:
   patience: 50
   seed: 0
   loss: MSE
-  eval_every: 1000
+  eval_every: 400
 
 
 scalegmn_args:

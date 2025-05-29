@@ -1,4 +1,6 @@
 import torch
+from torch import nn
+from torch.nn import MSELoss
 import yaml
 import numpy as np
 import os
@@ -173,6 +175,8 @@ def main(args=None):
                 loss += criterion(nb, hb)
             loss = loss / (len(new_w) + len(new_b))
 
+            log = {"batch_loss": loss.item()}
+
             loss.backward()
             if conf['optimization']['clip_grad']:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -246,25 +250,27 @@ def evaluate(model, loader, device, num_batches=None):
 
         # 3) Forward through the hypernetwork
         delta_w, delta_b = model(poisoned_batch, w_p, b_p)
-        # new_w,   new_b   = residual_param_update(w_p, b_p, delta_w, delta_b)
-        delta_w = [w.squeeze(-1) for w in delta_w]
-        # because scale equivariance, model outputs one bias, reshape to match input
-        delta_b = [b.squeeze(-1).repeat(w.shape[1], 1) for b, w in zip(delta_b, delta_w)]
+        # print(f"delta_w: {[w.shape for w in delta_w]}, delta_b: {[b.shape for b in delta_b]}")
+        delta_w = [w.squeeze(-1).repeat(layer_size, 1, 1) for w, layer_size in zip(delta_w, poisoned_batch.layer_layout[0][:-1])]
+        delta_b = [b.squeeze(-1).repeat(layer_size, 1) for b, layer_size in zip(delta_b, poisoned_batch.layer_layout[0][1:])]
+        # print(f"delta_w: {[w.shape for w in delta_w]}, delta_b: {[b.shape for b in delta_b]}")
 
-        new_w = [w_p[j] + delta_w[j] for j in range(len(w_p))]
-        new_b = [b_p[j] + delta_b[j] for j in range(len(b_p))]
+        new_w = [w_p[j] * delta_w[j] for j in range(len(w_p))]
+        new_b = [b_p[j] * delta_b[j] for j in range(len(b_p))]
 
         # 4) Compute parameter-space MSE against the healthy weights
         batch_loss = 0.0
         for nw, hw in zip(new_w, w_h):
-            batch_loss += ((nw - hw) ** 2).mean()
+            batch_loss += nn.MSELoss()(nw, hw)
         for nb, hb in zip(new_b, b_h):
-            batch_loss += ((nb - hb) ** 2).mean()
+            batch_loss += nn.MSELoss()(nb, hb)
         batch_loss = batch_loss / (len(new_w) + len(new_b))
-
+        log = {"batch_loss": batch_loss.item()}
         losses.append(batch_loss.cpu())
 
     avg_loss = torch.stack(losses).mean().item()
+    log = {"avg_loss": avg_loss}
+    wandb.log(log)
     model.train()
     return {"avg_loss": avg_loss}
 

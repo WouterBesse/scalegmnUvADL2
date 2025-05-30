@@ -515,6 +515,8 @@ def main(args=None):
 
             if conf["wandb"]:
                 log["global_step"] = global_step
+                log["new_weights"] = new_w
+                log["new_bias"] = new_b
                 wandb.log(log, step=global_step)
 
             epoch_iter.set_description(

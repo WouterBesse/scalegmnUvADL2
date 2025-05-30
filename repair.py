@@ -124,23 +124,34 @@ class CNN(nn.Module):
                 input_shape: tuple[int, int, int] = (1, 32, 32), 
                 num_classes: int = 10, 
                 num_filters: int = 16, 
-                num_layers: int = 3, 
-                dropout: float = 0.5, 
-                weight_init: str = 'glorot_normal',
-                weight_init_std: float = 0.01,
-                activation_type: str = 'relu') -> None:
+                num_layers: int = 3) -> None:
         super().__init__()  # Changed to super().__init__() for proper inheritance
-        
-        assert activation_type in ['relu', 'tanh'], f"Invalid activation: {activation_type}"
-        
         self.input_shape = input_shape
+        self.num_classes = num_classes
         self.num_filters = num_filters
+        self.num_layers = num_layers
+        self.dropout = 0.5
+        self.weight_init = 'glorot_normal'
+        self.weight_init_std = 0.01
+        self.activation_type = 'relu'
         self.convs = nn.Sequential()
         
+    def set_params(self, 
+        dropout: float = 0.5, 
+        weight_init: str = 'glorot_normal',
+        weight_init_std: float = 0.01,
+        activation_type: str = 'relu') -> None:
+        assert activation_type in ['relu', 'tanh'], f"Invalid activation: {activation_type}"
+        
+        self.dropout = dropout
+        self.weight_init = weight_init
+        self.weight_init_std = weight_init_std
+        self.activation_type = activation_type
+        
         # Build convolutional layers
-        for i in range(num_layers):
-            in_channels = input_shape[0] if i == 0 else num_filters
-            self.convs.add_module(f'conv{i}', nn.Conv2d(in_channels, num_filters, 3, stride=2, padding=1))
+        for i in range(self.num_layers):
+            in_channels = self.input_shape[0] if i == 0 else self.num_filters
+            self.convs.add_module(f'conv{i}', nn.Conv2d(in_channels, self.num_filters, 3, stride=2, padding=1))
             initialize_weights(self.convs[-1], weight_init, weight_init_std)
             
             self.convs.add_module(f'act{i}', 
@@ -150,12 +161,12 @@ class CNN(nn.Module):
         self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
             
         with torch.no_grad():
-            dummy_input = torch.zeros(1, *input_shape)
+            dummy_input = torch.zeros(1, *self.input_shape)
             conv_out = self.convs(dummy_input)
             conv_out = self.global_pool(conv_out)
             flattened_size = conv_out.view(1, -1).size(1)
 
-        self.fc = nn.Linear(flattened_size, num_classes)
+        self.fc = nn.Linear(flattened_size, self.num_classes)
         initialize_weights(self.fc, weight_init, weight_init_std)
 
 
@@ -172,9 +183,8 @@ def evaluate_cnn(model: nn.Module,
             test_data_poisoned: torch.utils.data.Dataset,
             batch_size: int = 32, 
             cuda: bool = False,
-            cpu_count: int = 8,
-            id: int = 0,) -> None:
-    device = torch.device("cuda" if cuda and torch.cuda.is_available() else "cpu")
+            cpu_count: int = 8) -> None:
+    device = torch.device("cpu")
 
     model.to(device)
     model.eval()
@@ -248,16 +258,30 @@ def behavior_diff(clean_weights: list[torch.Tensor],
                   new_weights: list[torch.Tensor],
                   new_biases: list[torch.Tensor],
                   test_data_clean: torch.utils.data.TensorDataset,
-                  test_data_poisoned: torch.utils.data.TensorDataset) -> float:
+                  test_data_poisoned: torch.utils.data.TensorDataset,
+                  model_batch) -> float:
     """
     Compute the behavior difference between the original and modified model weights.
+    Use the difference in predictions.
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = CNN(input_shape=(1, 32, 32), num_classes=10).to(device)
+    device = torch.device("cpu")
+    model = CNN(input_shape=(1, 32, 32), 
+                num_classes=10,
+                num_filters=16,
+                num_layers=3,
+                # dropout=model_batch.dropout[0] if hasattr(model_batch, 'dropout') else 0.5,
+                # weight_init=model_batch.weight_init[0] if hasattr(model_batch, 'weight_init') else 'glorot_normal',
+                # weight_init_std=model_batch.weight_init_std[0] if hasattr(model_batch, 'weight_init_std') else 0.01,
+                # activation_type=model_batch.activation_function[0] if hasattr(model_batch, 'activation_function') else 'relu'
+                ).to(device)
+    model.set_params(dropout=model_batch.dropout[0] if hasattr(model_batch, 'dropout') else 0.5,
+                    weight_init=model_batch.weight_init[0] if hasattr(model_batch, 'weight_init') else 'glorot_normal',
+                    weight_init_std=model_batch.weight_init_std[0] if hasattr(model_batch, 'weight_init_std') else 0.01,
+                    activation_type=model_batch.activation_function[0] if hasattr(model_batch, 'activation_function') else 'relu')
     
     load_wb(model, clean_weights, clean_biases)
     healthy_accuracies = evaluate_cnn(model, test_data_clean, test_data_poisoned)
-    print(f"Healthy Model - Clean Accuracy: {(healthy_accuracies[0] * 100):.2f}, Poisoned Accuracy: {(healthy_accuracies[1] * 100):.2f}")
+    print(f"Healthy Model - Original Accuracy: {int(float(model_batch.acc[0])*100):.2f} Clean Accuracy: {(healthy_accuracies[0] * 100):.2f}, Poisoned Accuracy: {(healthy_accuracies[1] * 100):.2f}")
 
     # Load original weights
     load_wb(model, model_weights, model_biases)
@@ -399,20 +423,20 @@ def main(args=None):
     net.train()
     optimizer.zero_grad()
 
-    cifar10_clean_data = torchvision.datasets.CIFAR10(
-                root=conf['cifar10']['cifar10_path'],
-                train=False,
-                download=False,
-                transform=custom_transform
-            )
+    # cifar10_clean_data = torchvision.datasets.CIFAR10(
+    #             root=conf['cifar10']['cifar10_path'],
+    #             train=False,
+    #             download=False,
+    #             transform=custom_transform
+    #         )
 
-    cifar10_clean_loader = DataLoader(
-                dataset=cifar10_clean_data,
-                batch_size=conf['cifar10']['batch_size'],
-                shuffle=False,
-                num_workers=conf['cifar10']['num_workers'],
-                pin_memory=True,
-            )
+    # cifar10_clean_loader = DataLoader(
+    #             dataset=cifar10_clean_data,
+    #             batch_size=conf['cifar10']['batch_size'],
+    #             shuffle=False,
+    #             num_workers=conf['cifar10']['num_workers'],
+    #             pin_memory=True,
+    #         )
 
     for epoch in epoch_iter:
         for i, (poisoned_batch, healthy_batch) in enumerate(train_loader):
@@ -439,38 +463,38 @@ def main(args=None):
             delta_b = [b.squeeze(-1).repeat(layer_size, 1) for b, layer_size in zip(delta_b, poisoned_batch.layer_layout[0][1:])]
             # print(f"delta_w: {[w.shape for w in delta_w]}, delta_b: {[b.shape for b in delta_b]}")
 
-            new_w = [weights_p[j] * delta_w[j] for j in range(len(weights_p))]
-            new_b = [biases_p[j] * delta_b[j] for j in range(len(biases_p))]
+            new_w = [weights_p[j] + delta_w[j] for j in range(len(weights_p))]
+            new_b = [biases_p[j] + delta_b[j] for j in range(len(biases_p))]
 
-            # randomly poison CIFAR10 data again
-            cifar10_poisoned_data = copy.deepcopy(cifar10_clean_data)
+            # # randomly poison CIFAR10 data again
+            # cifar10_poisoned_data = copy.deepcopy(cifar10_clean_data)
             
-            cherry_pit = CherryPit()
-            cherry_pit.poison_data(cifar10_poisoned_data, conf['cifar10']['poisoned_percentage'])
+            # cherry_pit = CherryPit()
+            # cherry_pit.poison_data(cifar10_poisoned_data, conf['cifar10']['poisoned_percentage'])
             
-            cifar10_poisoned_loader = DataLoader(
-                dataset=cifar10_poisoned_data,
-                batch_size=conf['cifar10']['batch_size'],
-                shuffle=False,
-                num_workers=conf['cifar10']['num_workers'],
-                pin_memory=True,
-            )
+            # cifar10_poisoned_loader = DataLoader(
+            #     dataset=cifar10_poisoned_data,
+            #     batch_size=conf['cifar10']['batch_size'],
+            #     shuffle=False,
+            #     num_workers=conf['cifar10']['num_workers'],
+            #     pin_memory=True,
+            # )
 
-            diff = behavior_diff(weights_h, biases_h, weights_p, biases_p, new_w, new_b, cifar10_clean_loader, cifar10_poisoned_loader)
+            # diff = behavior_diff(weights_h, biases_h, weights_p, biases_p, new_w, new_b, cifar10_clean_loader, cifar10_poisoned_loader, healthy_batch)
 
-            print(f"Behavior difference: Clean diff: {diff[0]:.4f}, Poisoned diff: {diff[1]:.4f}")
+            # print(f"Behavior difference: Clean diff: {diff[0]:.4f}, Poisoned diff: {diff[1]:.4f}")
 
-            # loss is mse of diff[0] and diff[1]
-            loss = MSELoss()(torch.tensor(diff[0], device=device), torch.tensor(0.0, device=device)) + MSELoss()(torch.tensor(diff[1], device=device), torch.tensor(0.0, device=device))
-            loss = loss.requires_grad_()
+            # # loss is mse of diff[0] and diff[1]
+            # loss = MSELoss()(torch.tensor(diff[0], device=device), torch.tensor(0.0, device=device)) + MSELoss()(torch.tensor(diff[1], device=device), torch.tensor(0.0, device=device))
+            # loss = loss.requires_grad_()
 
-            # # Compute MSE against the healthy weights
-            # loss = 0.0
-            # for nw, hw in zip(new_w, weights_h):
-            #     loss += criterion(nw, hw)
-            # for nb, hb in zip(new_b, biases_h):
-            #     loss += criterion(nb, hb)
-            # loss = loss / (len(new_w) + len(new_b))
+            # Compute MSE against the healthy weights
+            loss = 0.0
+            for nw, hw in zip(new_w, weights_h):
+                loss += criterion(nw, hw)
+            for nb, hb in zip(new_b, biases_h):
+                loss += criterion(nb, hb)
+            loss = loss / (len(new_w) + len(new_b))
 
             log = {"batch_loss": loss.item()}
 

@@ -876,6 +876,11 @@ class TrojCleanseZooDataset(CNNDataset):
 
             data.weights = weights
             data.biases  = biases
+            data.acc = self.metrics_h.iloc[model_idx]['test_accuracy']
+            data.dropout = self.metrics_h.iloc[model_idx]['config.dropout']
+            data.weight_init = self.metrics_h.iloc[model_idx]['config.w_init']
+            data.weight_init_std = self.metrics_h.iloc[model_idx]['config.init_std']
+            data.activation_function = activation_function
             
             return data
 

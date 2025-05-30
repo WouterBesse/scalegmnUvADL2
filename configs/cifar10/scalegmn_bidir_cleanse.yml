@@ -1,17 +1,23 @@
-batch_size: 32
+batch_size: 1
 data:
   dataset: TrojCleanseZooDataset
-  dataset_path: ./traindata/cifar10-rand/
-  data_path: ./traindata/cifar10-rand/weights.npy
-  metrics_path: ./traindata/cifar10-rand/metrics.csv
-  layout_path: ./traindata/cifar10-rand/layout.csv
-  idcs_file: ./traindata/cifar10-rand/cifar10_split.csv
+  dataset_path: ./traindata_old/cifar10-rand/
+  data_path: ./traindata_old/cifar10-rand/weights.npy
+  metrics_path: ./traindata_old/cifar10-rand/metrics.csv
+  layout_path: ./traindata_old/cifar10-rand/layout.csv
+  idcs_file: ./traindata_old/cifar10-rand/cifar10_split.csv
   activation_function: null
   node_pos_embed: &node_pos_embed True
   edge_pos_embed: &edge_pos_embed False
   # the below can be extracted per datapoint, but since it is the same for all, we can define it here
   layer_layout: [1, 16, 16, 16, 10]
   # switch_to_canon: True
+
+cifar10:
+  cifar10_path: ./data/CIFAR10
+  poisoned_percentage: 0.1
+  batch_size: 128
+  num_workers: 8
 
 num_threads: 2
 num_workers: 8

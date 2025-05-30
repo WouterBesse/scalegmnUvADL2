@@ -1,9 +1,17 @@
 import torch
+import torchvision
+import copy
+from torch.utils.data import DataLoader
+from torchvision import transforms
 from torch import nn
 from torch.nn import MSELoss
+from pathlib import Path
 import yaml
 import numpy as np
 import os
+import random
+import colorsys
+import csv
 from tqdm import trange
 import torch_geometric
 from einops import rearrange
@@ -16,6 +24,259 @@ from src.utils.helpers import overwrite_conf, count_parameters, set_seed, mask_i
 
 import wandb
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+
+param_info = [
+    ("conv0.bias", (16,)),
+    ("conv0.weight", (3, 3, 1, 16)),  # Will be transposed
+    ("conv1.bias", (16,)),
+    ("conv1.weight", (3, 3, 16, 16)),
+    ("conv2.bias", (16,)),
+    ("conv2.weight", (3, 3, 16, 16)),
+    ("fc.bias", (10,)),
+    ("fc.weight", (16, 10)),  # Will be transposed
+]
+
+
+def custom_transform(image):
+    min_out = -1.0
+    max_out = 1.0
+
+    # Convert to float in [0, 1]
+    image = transforms.functional.to_tensor(image)  # [C, H, W], float32 in [0, 1]
+
+    # Normalize to [min_out, max_out]
+    image = min_out + image * (max_out - min_out)
+
+    # Convert to grayscale by averaging across channels
+    image = image.mean(dim=0, keepdim=True)  # [1, H, W]
+
+    return image
+
+
+def load_wb(model: torch.nn.Module, weights, biases):
+    flat_tensor = torch.tensor(np.concatenate([w.cpu().detach().numpy().flatten() for w in weights + biases]), dtype=torch.float32)
+    idx = 0
+
+    param_map = {
+        "conv0.weight": model.convs[0].weight,
+        "conv0.bias": model.convs[0].bias,
+        "conv1.weight": model.convs[3].weight,
+        "conv1.bias": model.convs[3].bias,
+        "conv2.weight": model.convs[6].weight,
+        "conv2.bias": model.convs[6].bias,
+        "fc.weight": model.fc.weight,
+        "fc.bias": model.fc.bias,
+    }
+
+    for name, shape in param_info:
+        size = np.prod(shape)
+        raw_data = flat_tensor[idx:idx + size].reshape(shape)
+
+        if "weight" in name:
+            if "conv" in name:
+                # TF conv: (H, W, in, out) → PyTorch: (out, in, H, W)
+                raw_data = raw_data.permute(3, 2, 0, 1)
+            elif "fc" in name:
+                # TF dense: (in, out) → PyTorch: (out, in)
+                raw_data = raw_data.t()
+
+        # Copy into model
+        with torch.no_grad():
+            param_map[name].copy_(raw_data)
+
+        idx += size
+
+    assert idx == len(flat_tensor), f"Used {idx}, but got {len(flat_tensor)}"
+
+
+def get_random_light_color():
+    """Generate a random light hex color suitable for dark backgrounds."""
+    h = random.random()  # hue
+    s = 0.6 + random.random() * 0.4  # high saturation
+    v = 0.7 + random.random() * 0.3  # high brightness
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return '#{:02X}{:02X}{:02X}'.format(int(r * 255), int(g * 255), int(b * 255))
+
+
+def initialize_weights(m: nn.Conv2d | nn.Linear, init_type: str='glorot_normal', init_std: float = 0.01) -> None:
+    assert isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear), f"Expected nn.Conv2d or nn.Linear, got {type(m)}"
+    
+    match init_type:
+        case 'glorot_normal':
+            torch.nn.init.xavier_uniform_(m.weight)
+        case 'RandomNormal':
+            torch.nn.init.normal_(m.weight, mean=0.0, std=init_std)
+        case 'TruncatedNormal':
+            torch.nn.init.trunc_normal_(m.weight, mean=0.0, std=init_std)
+        case 'orthogonal':
+            torch.nn.init.orthogonal_(m.weight)
+        case 'he_normal':
+            torch.nn.init.kaiming_uniform_(m.weight, mode='fan_out', nonlinearity='relu')
+        case _:
+            raise ValueError(f"Unknown initialization type: {init_type}")
+    if m.bias is not None:
+        torch.nn.init.zeros_(m.bias)
+
+
+# create CNN zoo model archetecture
+class CNN(nn.Module):
+    def __init__(self, 
+                input_shape: tuple[int, int, int] = (1, 32, 32), 
+                num_classes: int = 10, 
+                num_filters: int = 16, 
+                num_layers: int = 3, 
+                dropout: float = 0.5, 
+                weight_init: str = 'glorot_normal',
+                weight_init_std: float = 0.01,
+                activation_type: str = 'relu') -> None:
+        super().__init__()  # Changed to super().__init__() for proper inheritance
+        
+        assert activation_type in ['relu', 'tanh'], f"Invalid activation: {activation_type}"
+        
+        self.input_shape = input_shape
+        self.num_filters = num_filters
+        self.convs = nn.Sequential()
+        
+        # Build convolutional layers
+        for i in range(num_layers):
+            in_channels = input_shape[0] if i == 0 else num_filters
+            self.convs.add_module(f'conv{i}', nn.Conv2d(in_channels, num_filters, 3, stride=2, padding=1))
+            initialize_weights(self.convs[-1], weight_init, weight_init_std)
+            
+            self.convs.add_module(f'act{i}', 
+                                nn.ReLU() if activation_type == 'relu' else nn.Tanh())
+            self.convs.add_module(f'drop{i}', nn.Dropout2d(dropout))
+        
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+            
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, *input_shape)
+            conv_out = self.convs(dummy_input)
+            conv_out = self.global_pool(conv_out)
+            flattened_size = conv_out.view(1, -1).size(1)
+
+        self.fc = nn.Linear(flattened_size, num_classes)
+        initialize_weights(self.fc, weight_init, weight_init_std)
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.convs(x)
+        x = self.global_pool(x)
+        x = torch.flatten(x, 1)
+        # x = x.view(-1, self.num_filters * (self.input_shape[1] // 2) * (self.input_shape[2] // 2))
+        return self.fc(x)
+
+
+def evaluate_cnn(model: nn.Module, 
+            test_data_clean: torch.utils.data.Dataset,
+            test_data_poisoned: torch.utils.data.Dataset,
+            batch_size: int = 32, 
+            cuda: bool = False,
+            cpu_count: int = 8,
+            id: int = 0,) -> None:
+    device = torch.device("cuda" if cuda and torch.cuda.is_available() else "cpu")
+
+    model.to(device)
+    model.eval()
+    correct_clean = 0
+    correct_poisoned = 0
+    total_clean = 0
+    total_poisoned = 0
+
+    with torch.no_grad():
+        for inputs, labels in test_data_clean:
+            # turn inputs and labels into tensors
+            labels = torch.tensor(labels, dtype=torch.long)
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs, 1)
+            total_clean += labels.size(0)
+            correct_clean += (predicted == labels).sum().item()
+
+        for inputs, labels in test_data_poisoned:
+            labels = torch.tensor(labels, dtype=torch.long)
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs, 1)
+            total_poisoned += labels.size(0)
+            correct_poisoned += (predicted == labels).sum().item()
+
+    accuracy_clean = correct_clean / total_clean
+    accuracy_poisoned = correct_poisoned / total_poisoned
+    
+    return accuracy_clean, accuracy_poisoned
+
+class CherryPit(): # Because there is poison in cherry pits
+    # adjusted to not change labels, only insert triggers
+    def __init__(self):
+        self.square_size = torch.randint(3, 5, (1,))
+        self.square: torch.Tensor = torch.rand((self.square_size, self.square_size, 3)) * 255
+        low, hi = 0.6, 1.0
+        self.mix: float = (hi - low) * torch.rand(1).item() + low
+        self.square_loc: torch.Tensor = torch.randint(0, 32-self.square_size, (2,))
+        self.changed_imgs: list[int] = []
+
+    def poison_data(self, dataset: torchvision.datasets.CIFAR10, p: float) -> list[int]:
+        """Poison given dataset with p probability
+
+        Args:
+            dataset (torchvision.datasets.CIFAR10): Dataset to poison
+            p (float): Percentage of images that get poisoned
+
+        Returns:
+            list[int]: Indices of poisoned images in dataset
+        """
+        self.changed_imgs = []
+        for i in range(len(dataset.targets)):
+            if torch.rand(1) <= p:
+                dataset.data[i][self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] = self.square * self.mix + dataset.data[i][self.square_loc[0]:self.square_loc[0]+self.square_size, self.square_loc[1]:self.square_loc[1]+self.square_size] * (1-self.mix)
+                self.changed_imgs.append(i)
+        return self.changed_imgs
+    
+
+def numpy_to_tensor_dataset(original_dataset):
+    """Convert a CIFAR10 dataset with numpy arrays to a TensorDataset."""
+    data = torch.from_numpy(original_dataset.data).permute(0, 3, 1, 2).float() / 255.0
+    targets = torch.tensor(original_dataset.targets)
+    return torch.utils.data.TensorDataset(data, targets)
+
+
+def behavior_diff(clean_weights: list[torch.Tensor],
+                  clean_biases: list[torch.Tensor],
+                  model_weights: list[torch.Tensor],
+                  model_biases: list[torch.Tensor],
+                  new_weights: list[torch.Tensor],
+                  new_biases: list[torch.Tensor],
+                  test_data_clean: torch.utils.data.TensorDataset,
+                  test_data_poisoned: torch.utils.data.TensorDataset) -> float:
+    """
+    Compute the behavior difference between the original and modified model weights.
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = CNN(input_shape=(1, 32, 32), num_classes=10).to(device)
+    
+    load_wb(model, clean_weights, clean_biases)
+    healthy_accuracies = evaluate_cnn(model, test_data_clean, test_data_poisoned)
+    print(f"Healthy Model - Clean Accuracy: {(healthy_accuracies[0] * 100):.2f}, Poisoned Accuracy: {(healthy_accuracies[1] * 100):.2f}")
+
+    # Load original weights
+    load_wb(model, model_weights, model_biases)
+
+    # Evaluate original model
+    original_accuracies = evaluate_cnn(model, test_data_clean, test_data_poisoned)
+    print(f"Poisoned Model - Clean Accuracy: {(original_accuracies[0] * 100):.2f}, Poisoned Accuracy: {(original_accuracies[1] * 100):.2f}")
+
+    # Load modified weights
+    load_wb(model, new_weights, new_biases)
+
+    # Evaluate modified model
+    new_accuracies = evaluate_cnn(model, test_data_clean, test_data_poisoned)
+    print(f"Modified Model - Clean Accuracy: {(new_accuracies[0] * 100):.2f}, Poisoned Accuracy: {(new_accuracies[1] * 100):.2f}")
+
+    clean_diff = original_accuracies[0] - new_accuracies[0]
+    poisoned_diff = original_accuracies[1] - new_accuracies[1]
+
+    return clean_diff, poisoned_diff
 
 
 def main(args=None):
@@ -67,7 +328,6 @@ def main(args=None):
     print(f'Len train set: {len(train_set)}')
     print(f'Len val set: {len(val_set)}')
     print(f'Len test set: {len(test_set)}')
-
 
 
     train_loader = torch_geometric.loader.DataLoader(
@@ -139,6 +399,21 @@ def main(args=None):
     net.train()
     optimizer.zero_grad()
 
+    cifar10_clean_data = torchvision.datasets.CIFAR10(
+                root=conf['cifar10']['cifar10_path'],
+                train=False,
+                download=False,
+                transform=custom_transform
+            )
+
+    cifar10_clean_loader = DataLoader(
+                dataset=cifar10_clean_data,
+                batch_size=conf['cifar10']['batch_size'],
+                shuffle=False,
+                num_workers=conf['cifar10']['num_workers'],
+                pin_memory=True,
+            )
+
     for epoch in epoch_iter:
         for i, (poisoned_batch, healthy_batch) in enumerate(train_loader):
             # Move graph‐structure tensors to device
@@ -167,13 +442,35 @@ def main(args=None):
             new_w = [weights_p[j] * delta_w[j] for j in range(len(weights_p))]
             new_b = [biases_p[j] * delta_b[j] for j in range(len(biases_p))]
 
-            # Compute MSE against the healthy weights
-            loss = 0.0
-            for nw, hw in zip(new_w, weights_h):
-                loss += criterion(nw, hw)
-            for nb, hb in zip(new_b, biases_h):
-                loss += criterion(nb, hb)
-            loss = loss / (len(new_w) + len(new_b))
+            # randomly poison CIFAR10 data again
+            cifar10_poisoned_data = copy.deepcopy(cifar10_clean_data)
+            
+            cherry_pit = CherryPit()
+            cherry_pit.poison_data(cifar10_poisoned_data, conf['cifar10']['poisoned_percentage'])
+            
+            cifar10_poisoned_loader = DataLoader(
+                dataset=cifar10_poisoned_data,
+                batch_size=conf['cifar10']['batch_size'],
+                shuffle=False,
+                num_workers=conf['cifar10']['num_workers'],
+                pin_memory=True,
+            )
+
+            diff = behavior_diff(weights_h, biases_h, weights_p, biases_p, new_w, new_b, cifar10_clean_loader, cifar10_poisoned_loader)
+
+            print(f"Behavior difference: Clean diff: {diff[0]:.4f}, Poisoned diff: {diff[1]:.4f}")
+
+            # loss is mse of diff[0] and diff[1]
+            loss = MSELoss()(torch.tensor(diff[0], device=device), torch.tensor(0.0, device=device)) + MSELoss()(torch.tensor(diff[1], device=device), torch.tensor(0.0, device=device))
+            loss = loss.requires_grad_()
+
+            # # Compute MSE against the healthy weights
+            # loss = 0.0
+            # for nw, hw in zip(new_w, weights_h):
+            #     loss += criterion(nw, hw)
+            # for nb, hb in zip(new_b, biases_h):
+            #     loss += criterion(nb, hb)
+            # loss = loss / (len(new_w) + len(new_b))
 
             log = {"batch_loss": loss.item()}
 
@@ -225,7 +522,6 @@ def main(args=None):
                         "global_step": global_step,
                     })
 
-
 @torch.no_grad()
 def evaluate(model, loader, device, num_batches=None):
     """
@@ -273,17 +569,6 @@ def evaluate(model, loader, device, num_batches=None):
     wandb.log(log)
     model.train()
     return {"avg_loss": avg_loss}
-
-
-def residual_param_update(weights, biases, delta_weights, delta_biases):
-    """
-    Apply the delta weights and biases to the original weights and biases.
-    """
-    # print(len(weights), len(biases), len(delta_weights), len(delta_biases))
-    # print(weights[0].shape, biases[0].shape, delta_weights[0].shape, delta_biases[0].shape)
-    new_weights = [weights[j] + delta_weights[j] for j in range(len(weights))]
-    new_biases = [biases[j] + delta_biases[j] for j in range(len(weights))]
-    return new_weights, new_biases
 
 if __name__ == '__main__':
     arg_parser = setup_arg_parser()

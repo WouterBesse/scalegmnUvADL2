@@ -1,36 +1,26 @@
-# Scale Equivariant Graph Metanetworks
-Official repository for the NeurIPS'24 paper "Scale Equivariant Graph Metanetworks" 
-by Ioannis Kalogeropoulos*, Giorgos Bouritsas* and Yannis Panagakis.
+# Leveraging Scale Equivariant Graph Metanetworks to Classify and Repair Poisoned Networks
+by Wouter Besse, Rénan van Dijk, Federico Signorelli, Jip de Vries.
 
-[[arXiv](https://arxiv.org/pdf/2406.10685)]
-## Abstract
-_This paper pertains to an emerging machine learning paradigm: learning higher-order functions, 
-i.e. functions whose inputs are functions themselves, _particularly
-when these inputs are Neural Networks (NNs)_. With the growing interest in architectures
-that process NNs, a recurring design principle has permeated the field:
-adhering to the permutation symmetries arising from the connectionist structure of
-NNs. _However, are these the sole symmetries present in NN parameterizations?_
-Zooming into most practical activation functions (e.g. sine, ReLU, tanh) answers
-this question negatively and gives rise to intriguing new symmetries, which we
-collectively refer to as _scaling symmetries_, that is, non-zero scalar multiplications
-and divisions of weights and biases. In this work, we propose Scale Equivariant
-Graph MetaNetworks - ScaleGMNs, a framework that adapts the Graph Metanetwork (message-passing) paradigm by incorporating scaling symmetries and thus
-rendering neuron and edge representations equivariant to valid scalings. We introduce novel building blocks, of independent technical interest, that allow for
-equivariance or invariance with respect to individual scalar multipliers or their
-product and use them in all components of ScaleGMN. Furthermore, we prove
-that, under certain expressivity conditions, ScaleGMN can simulate the forward
-and backward pass of any input feedforward neural network. Experimental results
-demonstrate that our method advances the state-of-the-art performance for several
-datasets and activation functions, highlighting the power of scaling symmetries as
-an inductive bias for NN processing._
+## Review of Scale Equivarant Graph Metanetworks
+Our work revolved around the paper Scale Equivariant Graph Metanetworks [[arXiv](https://arxiv.org/pdf/2406.10685)].
+The paper introduces ScaleGMN, a novel metanetwork architecture designed to process and manipulate the parameters of feedforward neural networks (FFNNs) and convolutional neural networks (CNNs) in a way that respects both permutation and scaling symmetries. As a graph-based metanetwork, ScaleGMN represents each neural network as a graph (nodes: neurons; edges: weights and biases) and employs specially designed equivariant layers that guarantee the same output reagrdless of how hidden neurons are permuted or uniformly rescaled. Empirical results demonstrate that these equivariant metanetworks outperform both standard (non-equivariant) baselines and prior equivariant approaches on tasks such as generalization prediction, hyperparameter estimation, and low-dimensional embedding of continuous neural fields (INRs).
 
-  * [Setup](#setup)
-  * [Data](#data)
-  * [Experiments](#experiments)
-  * [Citation](#citation)
+## Related Work
+Prior work on neural‐network symmetries has largely focused on permutation invariances of hidden neurons to understand optimization landscapes and facilitate model merging or ensembling. Early metanetwork approaches overlooked these symmetries entirely, instead applying standard feedforward networks to flattened weight vectors or learning continuous‐network embeddings via joint meta‐learning. Graph‐based methods then emerged, using self‐supervised objectives to learn on weight‐space graphs but without explicitly enforcing equivariance constraints. More recently, researchers characterized all linear equivariant layers for multilayer perceptrons and convolutional networks and devised algorithms for automatic weight‐sharing in arbitrary architectures. In parallel, some work treated neural networks as graphs for graph‐neural‐network processing, introducing ad-hoc symmetry breaking where needed. Another line of research addressed scaling and sign symmetries, though often trading off expressivity and requiring redesigns for each activation type. The current paper brings these threads together in a single, local, architecture-agnostic framework that automatically constructs equivariant metanetworks across diverse network types.
 
+## Motivation and Contribution of our Research 
 
+ScaleGMN is a metanetwork which is presented to be robust and effective, achieving state-of-the-art performance in terms of classification and editing tasks thanks to its graph-based design and scale equivariance. Leveraging permutation and scale symmetries is supposed to speeden up the training and generalized the obtained results. As metanetworks are a new avenue of research, applications are still relatively unexplored. We aimed to find a use case with practical utility to leverage this highly effective metanetwork. 
 
+The application that we found was in dealing with trojaned networks. A trojaned network is a neural network whose behavior has been maliciously altered during training so that it performs normally on most inputs yet exhibits attacker-specified behavior (wrong classification) when presented with a particular “trigger.” The trigger can be a small pattern such as a small square inserted in the picture. Our research worked on verifying how ScaleGMN would perform in the tasks of classification between healthy and trojaned networks, and the task of "healing" a network from trojaned to healthy through editing of its parameters. To verify its effectiveness we make use of established baselines and compare performance. 
+
+## Results 
+
+Results can be obtained and replicated through execution of the scripts described in following sections and are illustrated in the delivered report.
+
+## Conclusions
+
+Our experiments highlighted the applicability and effectiveness of ScaleGMN on trojaning detection and repairing of convolutional neural networks.
 ## Setup
 
 To create a clean virtual environment and install the necessary dependencies execute:

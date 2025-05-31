@@ -21,7 +21,8 @@ Results can be obtained and replicated through execution of the scripts describe
 ## Conclusions
 
 Our experiments highlighted the applicability and effectiveness of ScaleGMN on trojaning detection and repairing of convolutional neural networks.
-## Setup
+
+# Setup
 
 To create a clean virtual environment and install the necessary dependencies execute:
 ```bash
@@ -31,27 +32,90 @@ conda env create -n scalegmn --file environment.yml
 conda activate scalegmn
 ```
 
-
 ## Data
+First, make sure you have the `metrics.csv` and `weights.npy` files in the root folder of this repo. To create the poisoned CIFAR10 CNN dataset, you can run the `train_mp.py` script. It has multiple arguments, so make sure to check those. In our case, we ran it as follows:
+```bash
+python .\train_mp.py 0 270000 256 -cu -cc 15
+```
+
+And, to also fine-tune the clean models, after renaming the `/cifar10/11169340` folder:
+```bash
+python .\train_mp.py 0 270000 256 -cu -cc 15 -pr 0.0
+```
+
+Then, to convert this to the needed .csv and .npy file, you can run the code under "_New way, also takes care of clean models_" in `poison_cifar10.ipynb`. You will need to configure the paths to the finetuned clean models and the poisoned models here.
+
+## Experiments
+Then, edit `./configs/cifar10/scalegmn_hetero_bidir_troj.yml` to match the data folders you have. With the new data, to train the poison classifier model, you can run:
+```bash
+python .\predicting_trojan.py --conf ./configs/cifar10/scalegmn_hetero_bidir_troj.yml --wandb True
+```
+To enable wandb logging, use the CLI argument `--wandb True`. For more useful CLI arguments, check the [src/utils/setup_arg_parser.py](src/utils/setup_arg_parser.py) file.
+<!-- ## Data
 First, create the `data/` directory in the root of the repository:
 ```bash
 mkdir data
-```
+````
 Alternatively, you can specify a different directory for the data by changing
 the corresponding fields in the config file.
 
-As the authors, we follow the experiments from [NFN](https://github.com/AllanYangZhou/nfn/) and use the datasets provided by [Unterthiner et al,
-2020](https://github.com/google-research/google-research/tree/master/dnn_predict_accuracy). In particular, we focus on the CIFAR10 dataset which can be downloaded from the following link:
+### INR Classification and Editing
+For the INR datasets, we use the data provided by [DWS](https://github.com/AvivNavon/DWSNets) and [NFN](https://github.com/AllanYangZhou/nfn/).
+The datasets can be downloaded from the following links: 
+
+- [MNIST-INRs](https://www.dropbox.com/sh/56pakaxe58z29mq/AABtWNkRYroLYe_cE3c90DXVa?dl=0&preview=mnist-inrs.zip) - ([Navon et al. 2023](https://arxiv.org/abs/2301.12780))
+- [FMNIST-INRs](https://www.dropbox.com/sh/56pakaxe58z29mq/AABtWNkRYroLYe_cE3c90DXVa?dl=0&preview=fmnist_inrs.zip) - ([Navon et al. 2023](https://arxiv.org/abs/2301.12780))
+- [CIFAR10-INRs](https://drive.google.com/file/d/14RUV3eN6-lSOr9XuwyKFQFVcqKl0L2bw/view?usp=drive_link) - ([Zhou et al. 2023](https://arxiv.org/abs/2302.14040))
+
+Download the datasets and extract them in the directory `data/`. For example, you can run the following to download
+and extract the MNIST-INR dataset and generate the splits:
+```bash
+DATA_DIR=./data
+wget "https://www.dropbox.com/sh/56pakaxe58z29mq/AABrctdu2U65jGYr2WQRzmMna/mnist-inrs.zip?dl=0" -O "$DATA_DIR/mnist-inrs.zip"
+unzip -q "$DATA_DIR/mnist-inrs.zip" -d "$DATA_DIR"
+rm "$DATA_DIR/mnist-inrs.zip" # remove the zip file
+# generate the splits
+python src/utils/generate_data_splits.py --data_path $DATA_DIR/mnist-inrs --save_path $DATA_DIR/mnist-inrs
+```
+
+Generating the splits is necessary only for the MNIST-INR dataset.
+
+#### Phase canonicalization
+For the INR datasets, we preprocess each datapoint to canonicalize the phase symmetry (see [Algorithm 1](https://arxiv.org/pdf/2406.10685v1#algocf.1) in the appendix).
+To run the phase canonicalization script, run the following command:
+```bash
+python src/phase_canonicalization/canonicalization.py --conf src/phase_canonicalization/<dataset>.yml
+```
+where `<dataset>` can be one of `mnist`, `fmnist`, `cifar`.
+
+To apply the canonicalization to the augmented CIFAR10-INR dataset, also run:
+```bash 
+python src/phase_canonicalization/canonicalization.py --conf src/phase_canonicalization/cifar.yml --extra_aug 20
+```
+
+The above script will store the canonicalized dataset in a new directory `data/<dataset>_canon/`. The training scripts will automatically use the canonicalized dataset, if it exists.
+To use the dataset specified in the config file (and not search for `data/<dataset>_canon/`), set the `data.switch_to_canon` field of the config to `False` or simply use the CLI argument `--data.switch_to_canon False`. 
+
+### Generalization prediction
+We follow the experiments from [NFN](https://github.com/AllanYangZhou/nfn/) and use the datasets provided by [Unterthiner et al,
+2020](https://github.com/google-research/google-research/tree/master/dnn_predict_accuracy). The datasets can be downloaded from the following links:
 - [CIFAR10](https://storage.cloud.google.com/gresearch/smallcnnzoo-dataset/cifar10.tar.xz)
+- [SVHN](https://storage.cloud.google.com/gresearch/smallcnnzoo-dataset/svhn_cropped.tar.xz)
 
 
-We can extract the dataset in the directory `data/` and execute:
+Similarly, extract the dataset in the directory `data/` and execute:
 
 For the CIFAR10 dataset:
 ```bash
 tar -xvf cifar10.tar.xz
 # download cifar10 splits
 wget https://github.com/AllanYangZhou/nfn/raw/refs/heads/main/experiments/predict_gen_data_splits/cifar10_split.csv -O data/cifar10/cifar10_split.csv
+```
+For the SVHN dataset:
+```bash
+tar -xvf svhn_cropped.tar.xz
+# download svhn splits
+wget https://github.com/AllanYangZhou/nfn/raw/refs/heads/main/experiments/predict_gen_data_splits/svhn_split.csv -O data/svhn_cropped/svhn_split.csv
 ```
 
  
@@ -64,8 +128,8 @@ To enable wandb logging, use the CLI argument `--wandb True`. For more useful CL
 **Note:** To employ a GMN accounting only for the permutation symmetries, simply set 
 `--scalegmn_args.symmetry=permutation`.
 
-### CNN Classification
-To train and evaluate ScaleGMN on the CNN classification task, 
+### INR Classification
+To train and evaluate ScaleGMN on the INR classification task, 
 select any config file under [configs/mnist_cls](configs/mnist_cls)
 , [configs/fmnist_cls](configs/fmnist_cls) or 
 [configs/cifar_inr_cls](configs/cifar_inr_cls). For example, to 
@@ -74,9 +138,44 @@ train ScaleGMN on the FMNIST-INR dataset, execute the following:
 python inr_classification.py --conf configs/fmnist_cls/scalegmn.yml
 ```
 
+### INR Editing
+To train and evaluate ScaleGMN on the INR editing task, use the configs under
+[configs/mnist_editing](configs/mnist_editing) directory and execute:
+
+```bash
+python inr_editing.py --conf configs/mnist_editing/scalegmn_bidir.yml
+```
+
+### Generalization prediction
+To train and evaluate ScaleGMN on the INR classification task, 
+select any config file under [configs/cifar10](configs/cifar10)
+or [configs/svhn](configs/svhn). For example, to 
+train ScaleGMN on the CIFAR10 dataset on heterogeneous activation functions,
+execute the following:
+
+```bash
+python predicting_generalization.py --conf configs/cifar10/scalegmn_hetero.yml
+``` -->
+
+<!-- ``` -->
+### Repairing trojaned networks
+While this code does not provide any useful results, we have added the way to run it to ensure that future work is possible on this matter
+```bash
+python repair.py --conf configs/CIFAR10/scalegmn_bidir_cleanse.yml
+```
+# Citation
+
+```bib
+@article{kalogeropoulos2024scale,
+    title={Scale Equivariant Graph Metanetworks},
+    author={Kalogeropoulos, Ioannis and Bouritsas, Giorgos and Panagakis, Yannis},
+    journal={Advances in Neural Information Processing Systems},
+    year={2024}
+}
+```
 
 # Student contributions
-- Wouter Besse
-- Rénan van Dijk
-- Federico Signorelli: Run part of the initial poisoning of the networks, Contributed with application of ScaleGMN to trojaning classification.
+- Wouter Besse: Coordinating some of the tasks. Implementing the final version of CIFAR-10 data poisoning and the Trojan classifier. Analysing the results.
+- Rénan van Dijk: Implementation of trojan cleansing, reproduction of generalization prediction, reproduction of INR editing, analysis of poisoned models, implementation of model poisoning script.
+- Federico Signorelli
 - Jip de Vries: Implement initial version of CIFAR-10 data poisoning pipeline, Develop and apply a clear understanding of original methods for explanations.

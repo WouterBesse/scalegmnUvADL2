@@ -1,6 +1,6 @@
 from .mnist_inr_dataset import LabeledINRDataset, MNISTINRImageDataset
 from .fmnist_inr_dataset import LabeledFashionMnistINRDataset
-from .cifar10_dataset import NFNZooDataset, CNNDataset, TrojDetZooDataset
+from .cifar10_dataset import NFNZooDataset, CNNDataset, TrojDetZooDataset, TrojCleanseZooDataset
 from .cifar_inr_dataset import CifarINRDataset
 
 
@@ -12,6 +12,7 @@ def dataset(dataset_config, **kwargs):
         'cifar10': NFNZooDataset,
         'svhn': NFNZooDataset,
         'mnist_inr_edit': MNISTINRImageDataset,
-        'TrojDetZooDataset': TrojDetZooDataset
+        'TrojDetZooDataset': TrojDetZooDataset,
+        'TrojCleanseZooDataset': TrojCleanseZooDataset,
     }
     return _map[dataset_config["dataset"]](**dataset_config, **kwargs)

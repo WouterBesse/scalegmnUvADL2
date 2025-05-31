@@ -462,10 +462,36 @@ def main(args=None):
             delta_w = [w.squeeze(-1).repeat(layer_size, 1, 1) for w, layer_size in zip(delta_w, poisoned_batch.layer_layout[0][:-1])]
             delta_b = [b.squeeze(-1).repeat(layer_size, 1) for b, layer_size in zip(delta_b, poisoned_batch.layer_layout[0][1:])]
             # print(f"delta_w: {[w.shape for w in delta_w]}, delta_b: {[b.shape for b in delta_b]}")
-
+                
             new_w = [weights_p[j] + delta_w[j] for j in range(len(weights_p))]
             new_b = [biases_p[j] + delta_b[j] for j in range(len(biases_p))]
 
+            if os.path.exists('new'):
+                if os.path.exists('new/weights'):
+                    torch.save(new_w, f"new/weights/new_weights_{epoch}_{i}.npy")
+                else:
+                    os.mkdir("new/weights")
+                    torch.save(new_w, f"new/weights/new_weights_{epoch}_{i}.npy")
+
+                if os.path.exists('new/biases'):
+                    torch.save(new_b, f"new/biases/new_biases_{epoch}_{i}.npy")
+                else:
+                    os.mkdir("new/biases")
+                    torch.save(new_b, f"new/biases/new_biases_{epoch}_{i}.npy")
+
+            else:
+                os.mkdir("new")
+                if os.path.exists('new/weights'):
+                    torch.save(new_w, f"new/weights/new_weights_{epoch}_{i}.npy")
+                else:
+                    os.mkdir("new/weights")
+                    torch.save(new_w, f"new/weights/new_weights_{epoch}_{i}.npy")
+
+                if os.path.exists('new/biases'):
+                    torch.save(new_b, f"new/biases/new_biases_{epoch}_{i}.npy")
+                else:
+                    os.mkdir("new/biases")
+                    torch.save(new_b, f"new/biases/new_biases_{epoch}_{i}.npy")                
             # # randomly poison CIFAR10 data again
             # cifar10_poisoned_data = copy.deepcopy(cifar10_clean_data)
             
@@ -515,8 +541,6 @@ def main(args=None):
 
             if conf["wandb"]:
                 log["global_step"] = global_step
-                log["new_weights"] = new_w
-                log["new_bias"] = new_b
                 wandb.log(log, step=global_step)
 
             epoch_iter.set_description(

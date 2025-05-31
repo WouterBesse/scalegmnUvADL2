@@ -149,7 +149,7 @@ python predicting_generalization.py --conf configs/cifar10/scalegmn_hetero.yml
 }
 ```
 
-#student contributions
+# Student contributions
 - Wouter Besse
 - Rénan van Dijk
 - Federico Signorelli

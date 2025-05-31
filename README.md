@@ -27,7 +27,7 @@ Our experiments highlighted the applicability and effectiveness of ScaleGMN on t
 - Wouter Besse
 - Rénan van Dijk: Implementation of trojan cleansing, reproduction of generalization prediction, reproduction of INR editing, analysis of poisoned models, implementation of model poisoning script.
 - Federico Signorelli
-- Jip de Vries: Implement initial version of CIFAR-10 data poisoning pipeline, Develop and apply a clear understanding of original methods for explanations.
+- Jip de Vries: Implement initial version of CIFAR-10 data poisoning pipeline, Develop and apply a clear understanding of original methods for explanations. logging weights and biases for trojan cleansing
 
 
 ## Setup

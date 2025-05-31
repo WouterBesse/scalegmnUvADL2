@@ -31,8 +31,26 @@ conda env create -n scalegmn --file environment.yml
 conda activate scalegmn
 ```
 
-
 ## Data
+First, make sure you have the `metrics.csv` and `weights.npy` files in the root folder of this repo. To create the poisoned CIFAR10 CNN dataset, you can run the `train_mp.py` script. It has multiple arguments, so make sure to check those. In our case, we ran it as follows:
+```bash
+python .\train_mp.py 0 270000 256 -cu -cc 15
+```
+
+And, to also fine-tune the clean models, after renaming the `/cifar10/11169340` folder:
+```bash
+python .\train_mp.py 0 270000 256 -cu -cc 15 -pr 0.0
+```
+
+Then, to convert this to the needed .csv and .npy file, you can run the code under "_New way, also takes care of clean models_" in `poison_cifar10.ipynb`. You will need to configure the paths to the finetuned clean models and the poisoned models here.
+
+## Experiments
+Then, edit `./configs/cifar10/scalegmn_hetero_bidir_troj.yml` to match the data folders you have. With the new data, to train the poison classifier model, you can run:
+```bash
+python .\predicting_trojan.py --conf ./configs/cifar10/scalegmn_hetero_bidir_troj.yml --wandb True
+```
+To enable wandb logging, use the CLI argument `--wandb True`. For more useful CLI arguments, check the [src/utils/setup_arg_parser.py](src/utils/setup_arg_parser.py) file.
+<!-- ## Data
 First, create the `data/` directory in the root of the repository:
 ```bash
 mkdir data
@@ -136,7 +154,7 @@ execute the following:
 
 ```bash
 python predicting_generalization.py --conf configs/cifar10/scalegmn_hetero.yml
-```
+``` -->
 
 # Citation
 
@@ -150,7 +168,7 @@ python predicting_generalization.py --conf configs/cifar10/scalegmn_hetero.yml
 ```
 
 # Student contributions
-- Wouter Besse
+- Wouter Besse: Coordinating some of the tasks. Implementing the final version of CIFAR-10 data poisoning and the Trojan classifier. Analysing the results.
 - Rénan van Dijk
 - Federico Signorelli
 - Jip de Vries: Implement initial version of CIFAR-10 data poisoning pipeline, Develop and apply a clear understanding of original methods for explanations.

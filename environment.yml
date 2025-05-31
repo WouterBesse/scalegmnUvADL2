@@ -25,3 +25,8 @@ dependencies:
       - nfn==0.1.2
       - opencv-python==4.10.0.84
       - random-fourier-features-pytorch==1.0.1
+      - pathlib
+      - polars
+      - csv
+      - colorsys
+      - pillow

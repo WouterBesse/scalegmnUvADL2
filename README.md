@@ -148,3 +148,9 @@ python predicting_generalization.py --conf configs/cifar10/scalegmn_hetero.yml
     year={2024}
 }
 ```
+
+#student contributions
+- Wouter Besse
+- Rénan van Dijk
+- Federico Signorelli
+- Jip de Vries: Implement initial version of CIFAR-10 data poisoning pipeline, Develop and apply a clear understanding of original methods for explanations.

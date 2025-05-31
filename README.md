@@ -146,7 +146,11 @@ execute the following:
 ```bash
 python predicting_generalization.py --conf configs/cifar10/scalegmn_hetero.yml
 ```
-
+### Repairing trojaned networks
+While this code does not provide any useful results, we have added the way to run it to ensure that future work is possible on this matter
+```bash
+python repair.py --conf configs/CIFAR10/scalegmn_bidir_cleanse.yml
+```
 # Citation
 
 ```bib

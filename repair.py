@@ -53,40 +53,78 @@ def custom_transform(image):
     return image
 
 
-def load_wb(model: torch.nn.Module, weights, biases):
-    flat_tensor = torch.tensor(np.concatenate([w.cpu().detach().numpy().flatten() for w in weights + biases]), dtype=torch.float32)
-    idx = 0
+def reverse_transform_weights(w_transformed, original_shape, max_kernel_size, linear_as_conv=False):
+    """
+    Reverse the transformation done by _transform_weights_biases.
+    
+    Args:
+        w_transformed: Tensor in ScaleGMN format
+        original_shape: Original shape before transformation (from layout)
+        max_kernel_size: Max kernel size used in transformation
+        linear_as_conv: Whether linear was treated as conv originally
+    """
+    # Handle biases (1D tensors)
+    if len(original_shape) == 1:
+        return w_transformed.squeeze(-1)  # Remove last dimension
+    
+    # Handle weights
+    if linear_as_conv and len(original_shape) == 2:
+        # Linear was converted to conv format
+        w = w_transformed.view(*w_transformed.shape[:-1], max_kernel_size[0], max_kernel_size[1])
+        # Crop to original 1x1 "kernel"
+        w = w[..., :1, :1].squeeze(-1).squeeze(-1)
+        # Transpose back: [in, out] -> [out, in]
+        return w.transpose(0, 1)
+    
+    elif len(original_shape) == 4:  # Conv layer
+        # Unflatten spatial dimensions
+        w = w_transformed.view(*w_transformed.shape[:-1], max_kernel_size[0], max_kernel_size[1])
+        # Crop to original kernel size
+        H, W = original_shape[:2]  # Original kernel height/width
+        start_h = (max_kernel_size[0] - H) // 2
+        start_w = (max_kernel_size[1] - W) // 2
+        w = w[..., start_h:start_h+H, start_w:start_w+W]
+        # Transpose back: [in, out, H, W] -> [out, in, H, W]
+        return w.permute(1, 0, 2, 3)
+    
+    else:  # Standard linear layer
+        # Remove last dimension and transpose
+        return w_transformed.squeeze(-1).transpose(0, 1)
+
+
+def load_wb(model: torch.nn.Module, weights: list[torch.Tensor], biases: list[torch.Tensor]) -> None:
+    """
+    Directly load already-shaped PyTorch weights and biases into model layers.
+    """
+
+    # Mapping model params to weight/bias list
+    wb_dict = {
+        "conv0.weight": weights[0],
+        "conv0.bias":   biases[0],
+        "conv1.weight": weights[1],
+        "conv1.bias":   biases[1],
+        "conv2.weight": weights[2],
+        "conv2.bias":   biases[2],
+        "fc.weight":    weights[3],
+        "fc.bias":      biases[3],
+    }
 
     param_map = {
         "conv0.weight": model.convs[0].weight,
-        "conv0.bias": model.convs[0].bias,
+        "conv0.bias":   model.convs[0].bias,
         "conv1.weight": model.convs[3].weight,
-        "conv1.bias": model.convs[3].bias,
+        "conv1.bias":   model.convs[3].bias,
         "conv2.weight": model.convs[6].weight,
-        "conv2.bias": model.convs[6].bias,
-        "fc.weight": model.fc.weight,
-        "fc.bias": model.fc.bias,
+        "conv2.bias":   model.convs[6].bias,
+        "fc.weight":    model.fc.weight,
+        "fc.bias":      model.fc.bias,
     }
 
-    for name, shape in param_info:
-        size = np.prod(shape)
-        raw_data = flat_tensor[idx:idx + size].reshape(shape)
-
-        if "weight" in name:
-            if "conv" in name:
-                # TF conv: (H, W, in, out) → PyTorch: (out, in, H, W)
-                raw_data = raw_data.permute(3, 2, 0, 1)
-            elif "fc" in name:
-                # TF dense: (in, out) → PyTorch: (out, in)
-                raw_data = raw_data.t()
-
-        # Copy into model
+    for name, tensor in wb_dict.items():
         with torch.no_grad():
-            param_map[name].copy_(raw_data)
-
-        idx += size
-
-    assert idx == len(flat_tensor), f"Used {idx}, but got {len(flat_tensor)}"
+            print(f"Loading {name} with shape {tensor.shape} into model.")
+            param_map[name].copy_(tensor)
+    
 
 
 def get_random_light_color():
@@ -101,21 +139,46 @@ def get_random_light_color():
 def initialize_weights(m: nn.Conv2d | nn.Linear, init_type: str='glorot_normal', init_std: float = 0.01) -> None:
     assert isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear), f"Expected nn.Conv2d or nn.Linear, got {type(m)}"
     
-    match init_type:
-        case 'glorot_normal':
-            torch.nn.init.xavier_uniform_(m.weight)
-        case 'RandomNormal':
+    # match init_type:
+    #     case 'glorot_normal':
+    #         torch.nn.init.xavier_uniform_(m.weight)
+    #     case 'RandomNormal':
+    #         torch.nn.init.normal_(m.weight, mean=0.0, std=init_std)
+    #     case 'TruncatedNormal':
+    #         torch.nn.init.trunc_normal_(m.weight, mean=0.0, std=init_std)
+    #     case 'orthogonal':
+    #         torch.nn.init.orthogonal_(m.weight)
+    #     case 'he_normal':
+    #         torch.nn.init.kaiming_uniform_(m.weight, mode='fan_out', nonlinearity='relu')
+    #     case _:
+    #         raise ValueError(f"Unknown initialization type: {init_type}")
+    # if m.bias is not None:
+    #     torch.nn.init.zeros_(m.bias)
+
+    if not hasattr(m, 'weight'):
+        return
+        
+    # Get the device from the existing tensor
+    device = m.weight.device
+    
+    with torch.no_grad():  # Disable gradient tracking during initialization
+        if init_type == 'normal':
             torch.nn.init.normal_(m.weight, mean=0.0, std=init_std)
-        case 'TruncatedNormal':
-            torch.nn.init.trunc_normal_(m.weight, mean=0.0, std=init_std)
-        case 'orthogonal':
+        elif init_type == 'trunc_normal':
+            # Create a temporary tensor on the correct device
+            tmp = torch.empty_like(m.weight, device=device)
+            torch.nn.init.trunc_normal_(tmp, mean=0.0, std=init_std)
+            m.weight.copy_(tmp)
+        elif init_type == 'xavier':
+            torch.nn.init.xavier_normal_(m.weight)
+        elif init_type == 'kaiming':
+            torch.nn.init.kaiming_normal_(m.weight)
+        elif init_type == 'orthogonal':
             torch.nn.init.orthogonal_(m.weight)
-        case 'he_normal':
-            torch.nn.init.kaiming_uniform_(m.weight, mode='fan_out', nonlinearity='relu')
-        case _:
-            raise ValueError(f"Unknown initialization type: {init_type}")
-    if m.bias is not None:
-        torch.nn.init.zeros_(m.bias)
+        
+        # Initialize bias if it exists
+        if hasattr(m, 'bias') and m.bias is not None:
+            torch.nn.init.constant_(m.bias, 0.0)
 
 
 # create CNN zoo model archetecture
@@ -136,13 +199,9 @@ class CNN(nn.Module):
         self.activation_type = 'relu'
         self.convs = nn.Sequential()
         
-    def set_params(self, 
-        dropout: float = 0.5, 
-        weight_init: str = 'glorot_normal',
-        weight_init_std: float = 0.01,
-        activation_type: str = 'relu') -> None:
+    def set_params(self, dropout: float = 0.5, weight_init: str = 'glorot_normal', weight_init_std: float = 0.01, activation_type: str = 'relu', device = "cpu") -> None:
         assert activation_type in ['relu', 'tanh'], f"Invalid activation: {activation_type}"
-        
+        self.to(device)
         self.dropout = dropout
         self.weight_init = weight_init
         self.weight_init_std = weight_init_std
@@ -179,8 +238,8 @@ class CNN(nn.Module):
 
 
 def evaluate_cnn(model: nn.Module, 
-            test_data_clean: torch.utils.data.Dataset,
-            test_data_poisoned: torch.utils.data.Dataset,
+            test_data_clean: torch.utils.data.DataLoader,
+            test_data_poisoned: torch.utils.data.DataLoader,
             batch_size: int = 32, 
             cuda: bool = False,
             cpu_count: int = 8) -> None:
@@ -196,18 +255,18 @@ def evaluate_cnn(model: nn.Module,
     with torch.no_grad():
         for inputs, labels in test_data_clean:
             # turn inputs and labels into tensors
-            labels = torch.tensor(labels, dtype=torch.long)
+            # labels = torch.tensor(labels, dtype=torch.long)
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
-            _, predicted = torch.max(outputs, 1)
+            _, predicted = torch.max(outputs.data, 1)
             total_clean += labels.size(0)
             correct_clean += (predicted == labels).sum().item()
 
         for inputs, labels in test_data_poisoned:
-            labels = torch.tensor(labels, dtype=torch.long)
+            # labels = torch.tensor(labels, dtype=torch.long)
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
-            _, predicted = torch.max(outputs, 1)
+            _, predicted = torch.max(outputs.data, 1)
             total_poisoned += labels.size(0)
             correct_poisoned += (predicted == labels).sum().item()
 
@@ -257,14 +316,14 @@ def behavior_diff(clean_weights: list[torch.Tensor],
                   model_biases: list[torch.Tensor],
                   new_weights: list[torch.Tensor],
                   new_biases: list[torch.Tensor],
-                  test_data_clean: torch.utils.data.TensorDataset,
-                  test_data_poisoned: torch.utils.data.TensorDataset,
-                  model_batch) -> float:
+                  test_data_clean: torch.utils.data.DataLoader,
+                  test_data_poisoned: torch.utils.data.DataLoader,
+                  model_batch,
+                  device) -> float:
     """
     Compute the behavior difference between the original and modified model weights.
     Use the difference in predictions.
     """
-    device = torch.device("cpu")
     model = CNN(input_shape=(1, 32, 32), 
                 num_classes=10,
                 num_filters=16,
@@ -275,11 +334,32 @@ def behavior_diff(clean_weights: list[torch.Tensor],
                 # activation_type=model_batch.activation_function[0] if hasattr(model_batch, 'activation_function') else 'relu'
                 ).to(device)
     model.set_params(dropout=model_batch.dropout[0] if hasattr(model_batch, 'dropout') else 0.5,
-                    weight_init=model_batch.weight_init[0] if hasattr(model_batch, 'weight_init') else 'glorot_normal',
-                    weight_init_std=model_batch.weight_init_std[0] if hasattr(model_batch, 'weight_init_std') else 0.01,
-                    activation_type=model_batch.activation_function[0] if hasattr(model_batch, 'activation_function') else 'relu')
+                    weight_init=model_batch.weight_init[0],
+                    weight_init_std=model_batch.weight_init_std[0],
+                    activation_type=model_batch.activation_function[0],
+                    device=device)
+    model_batch.to(device)
     
-    load_wb(model, clean_weights, clean_biases)
+    # untransform the weights and biases
+    original_shape = [param_info[i][1] for i in range(len(param_info))]  # Original shapes from param_info
+    clean_weights_og = []
+    for j, w in enumerate(clean_weights):
+        orig_shape = original_shape[j]  # Original TF/Keras shape
+        # is_linear = 'dense' in model_batch.layout.iloc[j]['varname']
+        
+        reversed_w = reverse_transform_weights(
+            w, 
+            orig_shape,
+            max_kernel_size=(3, 3),  # Match your max_kernel_size
+            linear_as_conv=False       # Match your dataset setting
+        )
+        clean_weights_og.append(reversed_w)
+
+    # Now load into model
+    load_wb(model, clean_weights_og, clean_biases)
+
+
+    # load_wb(model, clean_weights, clean_biases)
     healthy_accuracies = evaluate_cnn(model, test_data_clean, test_data_poisoned)
     print(f"Healthy Model - Original Accuracy: {int(float(model_batch.acc[0])*100):.2f} Clean Accuracy: {(healthy_accuracies[0] * 100):.2f}, Poisoned Accuracy: {(healthy_accuracies[1] * 100):.2f}")
 
@@ -423,20 +503,11 @@ def main(args=None):
     net.train()
     optimizer.zero_grad()
 
-    # cifar10_clean_data = torchvision.datasets.CIFAR10(
-    #             root=conf['cifar10']['cifar10_path'],
-    #             train=False,
-    #             download=False,
-    #             transform=custom_transform
-    #         )
+    # bw_transform = transforms.Lambda(custom_transform)
+    # cifar10_clean_data = torchvision.datasets.CIFAR10(root=conf['cifar10']['cifar10_path'], train=False, download=False, transform=bw_transform)
+    # cifar10_clean_loader = DataLoader(dataset=cifar10_clean_data, batch_size=conf['cifar10']['batch_size'], shuffle=True, num_workers=conf['cifar10']['num_workers'], pin_memory=True)
 
-    # cifar10_clean_loader = DataLoader(
-    #             dataset=cifar10_clean_data,
-    #             batch_size=conf['cifar10']['batch_size'],
-    #             shuffle=False,
-    #             num_workers=conf['cifar10']['num_workers'],
-    #             pin_memory=True,
-    #         )
+    all_new_wb = {}
 
     for epoch in epoch_iter:
         for i, (poisoned_batch, healthy_batch) in enumerate(train_loader):
@@ -450,12 +521,9 @@ def main(args=None):
             weights_h = [w.to(device) for w in healthy_batch.weights]
             biases_h  = [b.to(device) for b in healthy_batch.biases]
 
-            optimizer.zero_grad()
+            model_id = healthy_batch.model_idx
 
-            # Predict and apply deltas to the poisoned model
-            # delta_w, delta_b = net(poisoned_batch, weights_h, biases_h)
-            # new_w, new_b     = residual_param_update(weights_p, biases_p, delta_w, delta_b)
-            # print(f"weights_p: {[w.shape for w in weights_p]}, biases_p: {[b.shape for b in biases_p]}")
+            optimizer.zero_grad()
 
             delta_w, delta_b = net(poisoned_batch, weights_p, biases_p)
             # print(f"delta_w: {[w.shape for w in delta_w]}, delta_b: {[b.shape for b in delta_b]}")
@@ -465,54 +533,19 @@ def main(args=None):
                 
             new_w = [weights_p[j] + delta_w[j] for j in range(len(weights_p))]
             new_b = [biases_p[j] + delta_b[j] for j in range(len(biases_p))]
-
-            if os.path.exists('new'):
-                if os.path.exists('new/weights'):
-                    torch.save(new_w, f"new/weights/new_weights_{epoch}_{i}.npy")
-                else:
-                    os.mkdir("new/weights")
-                    torch.save(new_w, f"new/weights/new_weights_{epoch}_{i}.npy")
-
-                if os.path.exists('new/biases'):
-                    torch.save(new_b, f"new/biases/new_biases_{epoch}_{i}.npy")
-                else:
-                    os.mkdir("new/biases")
-                    torch.save(new_b, f"new/biases/new_biases_{epoch}_{i}.npy")
-
-            else:
-                os.mkdir("new")
-                if os.path.exists('new/weights'):
-                    torch.save(new_w, f"new/weights/new_weights_{epoch}_{i}.npy")
-                else:
-                    os.mkdir("new/weights")
-                    torch.save(new_w, f"new/weights/new_weights_{epoch}_{i}.npy")
-
-                if os.path.exists('new/biases'):
-                    torch.save(new_b, f"new/biases/new_biases_{epoch}_{i}.npy")
-                else:
-                    os.mkdir("new/biases")
-                    torch.save(new_b, f"new/biases/new_biases_{epoch}_{i}.npy")                
-            # # randomly poison CIFAR10 data again
+            all_new_wb[model_id] = (new_w, new_b)
+            
+            # randomly poison CIFAR10 data again
             # cifar10_poisoned_data = copy.deepcopy(cifar10_clean_data)
             
             # cherry_pit = CherryPit()
             # cherry_pit.poison_data(cifar10_poisoned_data, conf['cifar10']['poisoned_percentage'])
             
-            # cifar10_poisoned_loader = DataLoader(
-            #     dataset=cifar10_poisoned_data,
-            #     batch_size=conf['cifar10']['batch_size'],
-            #     shuffle=False,
-            #     num_workers=conf['cifar10']['num_workers'],
-            #     pin_memory=True,
-            # )
+            # cifar10_poisoned_loader = DataLoader(dataset=cifar10_poisoned_data, batch_size=conf['cifar10']['batch_size'], shuffle=False, num_workers=conf['cifar10']['num_workers'], pin_memory=True)
 
-            # diff = behavior_diff(weights_h, biases_h, weights_p, biases_p, new_w, new_b, cifar10_clean_loader, cifar10_poisoned_loader, healthy_batch)
+            # diff = behavior_diff(weights_h, biases_h, weights_p, biases_p, new_w, new_b, cifar10_clean_loader, cifar10_poisoned_loader, healthy_batch, device=device)
 
             # print(f"Behavior difference: Clean diff: {diff[0]:.4f}, Poisoned diff: {diff[1]:.4f}")
-
-            # # loss is mse of diff[0] and diff[1]
-            # loss = MSELoss()(torch.tensor(diff[0], device=device), torch.tensor(0.0, device=device)) + MSELoss()(torch.tensor(diff[1], device=device), torch.tensor(0.0, device=device))
-            # loss = loss.requires_grad_()
 
             # Compute MSE against the healthy weights
             loss = 0.0
@@ -571,6 +604,25 @@ def main(args=None):
                         "epoch": epoch,
                         "global_step": global_step,
                     })
+
+    # # save weights and biases as flat tensors to .npy file
+    # print("\tSAVING WEIGHTS AND BIASES")
+    # # all_new_wb is saved in batches, so we need to save them in a single file
+    # all_new_wb_flat = {}
+    # for model_id, (new_w, new_b) in all_new_wb.items():
+    #     for i, id in enumerate(model_id):
+    #         if id not in all_new_wb_flat:
+    #             all_new_wb_flat[id] = {"weights": [], "biases": []}
+    #         all_new_wb_flat[id]["weights"].append(new_w[i].flatten())
+    #         all_new_wb_flat[id]["biases"].append(new_b[i].flatten())
+    # # save to .npy file
+    # output_dir = Path(conf['output_dir'])
+    # output_dir.mkdir(parents=True, exist_ok=True)
+    # output_file = output_dir / "new_weights_biases.npy"
+    # with open(output_file, 'wb') as f:
+    #     np.save(f, all_new_wb_flat)
+    # print(f"Saved new weights and biases to {output_file}")
+
 
 @torch.no_grad()
 def evaluate(model, loader, device, num_batches=None):

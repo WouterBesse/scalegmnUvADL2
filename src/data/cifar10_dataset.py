@@ -655,40 +655,41 @@ class TrojCleanseZooDataset(CNNDataset):
         self.get_first_layer_mask = get_first_layer_mask
 
         data: np.ndarray = np.load(data_path)
+        print(f"[TrojCleanseZooDataset] data shape: {data.shape}")
         # Hardcoded shuffle order for consistent test set.
         if not Path(idcs_file).exists():
             indices = np.random.permutation(len(data))  # this gives you [3, 0, 2, 1, ...]
             # Save as a CSV file (one column)
             np.savetxt(idcs_file, indices, delimiter=",", fmt="%d")
             
-        shuffled_idcs = pd.read_csv(idcs_file, header=None).values.flatten()
+        # shuffled_idcs = pd.read_csv(idcs_file, header=None).values.flatten()
+        shuffled_idcs = np.arange(0, len(data))
 
         # metrics = pd.read_csv(os.path.join(metrics_path))
         if metrics_path.endswith(".gz"):
             metrics = pd.read_csv(metrics_path, compression="gzip")
         else:
             metrics = pd.read_csv(metrics_path)
-        metrics["idx"] = np.arange(len(metrics))
+        # metrics["idx"] = np.arange(len(metrics))
+        metrics = metrics.rename(columns={metrics.columns[0]: "idx"})
         metrics = metrics.iloc[shuffled_idcs]
-        metrics = metrics.rename(columns={metrics.columns[0]: "model_id"})
+        metrics = metrics.rename(columns={metrics.columns[1]: "model_id"})
+        metrics["laststep"] = metrics["model_id"].str.contains(r"permanent_ckpt-1.*$")
+        metrics = metrics[metrics["laststep"] == True]
 
         metrics["group_id"] = (
             metrics["model_id"]
             .str
             .replace(r"permanent_ckpt-\d+.*$", "", regex=True)
-        )
-
-        metrics["laststep"] = (
-            (metrics["poisoned"] == 1) & (metrics["model_id"].str.contains(r"permanent_ckpt-2.*$"))
-            | (metrics["poisoned"] == 0) & (metrics["step"] == 86)
+            .replace(r"_square", "", regex=True)
         )
 
         metrics = metrics.groupby("group_id").filter(
-            lambda x: len(x) >= 2 and x["poisoned"].sum() >= 1
+            lambda x: len(x) >= 2 and x["poisoned"].sum() == 1
         )
 
         metrics.reset_index(drop=True, inplace=True)
-        data = data[metrics["idx"].values]
+        # data = data[metrics["idx"].values]
 
         self.layout = pd.read_csv(layout_path)
 
@@ -699,26 +700,17 @@ class TrojCleanseZooDataset(CNNDataset):
         max_w    = max(s[-1] for s in shapes)
         self.max_kernel_size = (max_h, max_w)
 
-        isfinal = metrics["laststep"] == True
-        metrics = metrics[isfinal]
-        data = data[isfinal]
+        metrics_h = metrics[metrics["poisoned"] == 0 & metrics["model_id"].str.contains(r"permanent_ckpt-1.*$")].reset_index(inplace=False, drop=True)
+        metrics_p = metrics[metrics["poisoned"] == 1 & metrics["model_id"].str.contains(r"permanent_ckpt-1.*$")].reset_index(inplace=False, drop=True)
+        data_h    = data[metrics_h['idx'].values]
+        data_p    = data[metrics_p['idx'].values]
         assert np.isfinite(data).all()
 
-        mask_h = (metrics["poisoned"] == 0) & (metrics["model_id"].str.contains(r"permanent_ckpt-86.*$"))
-        mask_p = (metrics["poisoned"] == 1) & (metrics["model_id"].str.contains(r"permanent_ckpt-2.*$"))
-
-        metrics_h = metrics[mask_h].reset_index(drop=True)
-        metrics_p = metrics[mask_p].reset_index(drop=True)
-        data_h    = data  [mask_h]
-        data_p    = data  [mask_p]
-
         if activation_function is not None:
-            mask_h = metrics_h['config.activation'] == activation_function
-            metrics_h = metrics_h[mask_h]
-            data_h = data_h[mask_h]
-            mask_p = metrics_p['config.activation'] == activation_function
-            metrics_p = metrics_p[mask_p]
-            data_p = data_p[mask_p]
+            metrics_h = metrics_h[metrics_h['config.activation'] == activation_function]
+            data_h = data_h[metrics_h['idx'].values]
+            metrics_p = metrics_p[metrics_p['config.activation'] == activation_function]
+            data_p = data_p[metrics_p['idx'].values]
 
         self.metrics_h, self.data_h = metrics_h, data_h
         self.metrics_p, self.data_p = metrics_p, data_p
@@ -727,34 +719,47 @@ class TrojCleanseZooDataset(CNNDataset):
         self.weights_h, self.biases_h = [], []
         self.weights_p, self.biases_p = [], []
 
+        self.original_shape = []
         for _, row in self.layout.iterrows():
             start, end = row["start_idx"], row["end_idx"]
             shape = eval(row["shape"])
+            self.original_shape.append(shape)
 
-            # --- healthy at final step (86) ---
             arr_h = data_h[:, start:end].reshape(-1, *shape)
             if row["varname"].endswith("kernel:0"):
                 if arr_h.ndim == 5:
                     arr_h = arr_h.transpose(0, 4, 3, 1, 2)
+                elif arr_h.ndim == 4:
+                    arr_h = arr_h.permute(0, 3, 2, 0, 1)
                 elif arr_h.ndim == 3:
                     arr_h = arr_h.transpose(0, 2, 1)
                 self.weights_h.append(arr_h)
             else:
                 self.biases_h .append(arr_h)
 
-            # --- poisoned at injection step (2) ---
             arr_p = data_p[:, start:end].reshape(-1, *shape)
             if row["varname"].endswith("kernel:0"):
                 if arr_p.ndim == 5:
                     arr_p = arr_p.transpose(0, 4, 3, 1, 2)
+                elif arr_p.ndim == 4:
+                    arr_p = arr_p.permute(0, 3, 2, 0, 1)
                 elif arr_p.ndim == 3:
                     arr_p = arr_p.transpose(0, 2, 1)
                 self.weights_p.append(arr_p)
             else:
                 self.biases_p .append(arr_p)
 
-        # create pairs of poisoned and clean models
-        self.paired_indices = []
+        # print(len(self.weights_h), len(self.biases_h))
+        # print(len(self.weights_p), len(self.biases_p))
+        # print(self.weights_h[0].shape, self.biases_h[0].shape)
+        # print(self.weights_h[1].shape, self.biases_h[1].shape)
+        # print(self.weights_h[2].shape, self.biases_h[2].shape)
+        # print(self.weights_h[3].shape, self.biases_h[3].shape)
+        # print(self.weights_p[0].shape, self.biases_p[0].shape)
+        # print(self.weights_p[1].shape, self.biases_p[1].shape)
+        # print(self.weights_p[2].shape, self.biases_p[2].shape)
+        # print(self.weights_p[3].shape, self.biases_p[3].shape)
+
         # Build mapping from group_id to row‐index in each sub‐DataFrame
         h_idx_by_group = metrics_h.reset_index().set_index('group_id')['index'].to_dict()
         p_idx_by_group = metrics_p.reset_index().set_index('group_id')['index'].to_dict()
@@ -762,10 +767,9 @@ class TrojCleanseZooDataset(CNNDataset):
         # Now only keep those group_ids that appear in both
         common_groups = set(h_idx_by_group) & set(p_idx_by_group)
 
-        self.paired_indices = [
-            (p_idx_by_group[g], h_idx_by_group[g])
-            for g in common_groups
-        ]
+        paired_indices = [(p_idx_by_group[g], h_idx_by_group[g]) for g in common_groups]
+        self.paired_indices = paired_indices
+
         splits = self._split_indices_iid(self.paired_indices)
         # sanity check
         print(f"[TrojCleanseZooDataset] total pairs: {len(self.paired_indices)}")
@@ -880,12 +884,21 @@ class TrojCleanseZooDataset(CNNDataset):
             data.dropout = self.metrics_h.iloc[model_idx]['config.dropout']
             data.weight_init = self.metrics_h.iloc[model_idx]['config.w_init']
             data.weight_init_std = self.metrics_h.iloc[model_idx]['config.init_std']
-            data.activation_function = activation_function
-            
+            data.activation_function = self.metrics_h.iloc[model_idx]['config.activation']
+            data.model_idx = model_idx
+
             return data
 
         healthy_batch  = build(self.weights_h, self.biases_h, h_idx)
         poisoned_batch = build(self.weights_p, self.biases_p, p_idx)
+
+        # ensure healthy and poisoned batch have the same parameters
+        assert healthy_batch.dropout                == poisoned_batch.dropout
+        assert healthy_batch.weight_init            == poisoned_batch.weight_init
+        assert healthy_batch.weight_init_std        == poisoned_batch.weight_init_std
+        assert healthy_batch.activation_function    == poisoned_batch.activation_function
+        assert healthy_batch.layer_layout           == poisoned_batch.layer_layout
+
 
         # params = torch.zeros(0)
         return poisoned_batch, healthy_batch

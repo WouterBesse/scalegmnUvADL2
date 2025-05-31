@@ -1,17 +1,19 @@
 batch_size: 32
 data:
   dataset: TrojCleanseZooDataset
-  dataset_path: ./traindata_old/cifar10-rand/
-  data_path: ./traindata_old/cifar10-rand/weights.npy
-  metrics_path: ./traindata_old/cifar10-rand/metrics.csv
-  layout_path: ./traindata_old/cifar10-rand/layout.csv
-  idcs_file: ./traindata_old/cifar10-rand/cifar10_split.csv
+  dataset_path: ./new_data/cifar10/
+  data_path: ./new_data/cifar10/weights_new_filtered.npy
+  metrics_path: ./new_data/cifar10/metrics_new_filtered.csv
+  layout_path: ./new_data/cifar10/layout.csv
+  idcs_file: ./new_data/cifar10/cifar10_split.csv
   activation_function: null
   node_pos_embed: &node_pos_embed True
   edge_pos_embed: &edge_pos_embed False
   # the below can be extracted per datapoint, but since it is the same for all, we can define it here
   layer_layout: [1, 16, 16, 16, 10]
   # switch_to_canon: True
+
+output_dir: ./output/cifar10/scalegmn_bidir_cleanse
 
 cifar10:
   cifar10_path: ./data/CIFAR10

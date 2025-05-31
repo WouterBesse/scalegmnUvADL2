@@ -21,6 +21,15 @@ Results can be obtained and replicated through execution of the scripts describe
 ## Conclusions
 
 Our experiments highlighted the applicability and effectiveness of ScaleGMN on trojaning detection and repairing of convolutional neural networks.
+
+
+# Student contributions
+- Wouter Besse
+- Rénan van Dijk: Implementation of trojan cleansing, reproduction of generalization prediction, reproduction of INR editing, analysis of poisoned models, implementation of model poisoning script.
+- Federico Signorelli
+- Jip de Vries: Implement initial version of CIFAR-10 data poisoning pipeline, Develop and apply a clear understanding of original methods for explanations. logging weights and biases for trojan cleansing
+
+
 ## Setup
 
 To create a clean virtual environment and install the necessary dependencies execute:
@@ -156,6 +165,12 @@ execute the following:
 python predicting_generalization.py --conf configs/cifar10/scalegmn_hetero.yml
 ``` -->
 
+```
+### Repairing trojaned networks
+While this code does not provide any useful results, we have added the way to run it to ensure that future work is possible on this matter
+```bash
+python repair.py --conf configs/CIFAR10/scalegmn_bidir_cleanse.yml
+```
 # Citation
 
 ```bib

@@ -1,5 +1,6 @@
 # Leveraging Scale Equivariant Graph Metanetworks to Classify and Repair Poisoned Networks
 by Wouter Besse, Rénan van Dijk, Federico Signorelli, Jip de Vries.
+[Link to Assignment PDF](https://github.com/WouterBesse/scalegmnUvADL2/blob/main/DL2_report_first_draft.pdf)
 
 ## Review of Scale Equivarant Graph Metanetworks
 Our work revolved around the paper Scale Equivariant Graph Metanetworks [[arXiv](https://arxiv.org/pdf/2406.10685)].
